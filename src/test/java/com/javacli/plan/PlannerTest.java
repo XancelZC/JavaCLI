@@ -1,6 +1,7 @@
 package com.javacli.plan;
 
 import com.javacli.llm.GLMClient;
+import com.javacli.llm.LlmClient;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;

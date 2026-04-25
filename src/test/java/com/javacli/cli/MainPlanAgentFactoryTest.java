@@ -2,6 +2,8 @@ package com.javacli.cli;
 
 import com.javacli.agent.Agent;
 import com.javacli.agent.PlanExecuteAgent;
+import com.javacli.llm.GLMClient;
+import com.javacli.llm.LlmClient;
 import com.javacli.memory.MemoryManager;
 import com.javacli.tool.ToolRegistry;
 import org.junit.jupiter.api.Test;
@@ -14,12 +16,13 @@ class MainPlanAgentFactoryTest {
 
     @Test
     void planModeReusesReactToolRegistryAndMemoryManager() throws Exception {
+        LlmClient llmClient = new GLMClient("test-key");
         ToolRegistry sharedToolRegistry = new ToolRegistry();
-        Agent reactAgent = new Agent("test-key", sharedToolRegistry);
+        Agent reactAgent = new Agent(llmClient, sharedToolRegistry);
         MemoryManager sharedMemoryManager = reactAgent.getMemoryManager();
 
         PlanExecuteAgent planAgent = Main.createPlanAgent(
-                "test-key",
+                llmClient,
                 reactAgent,
                 (goal, plan) -> PlanExecuteAgent.PlanReviewDecision.cancel()
         );

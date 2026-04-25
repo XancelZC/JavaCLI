@@ -1,6 +1,6 @@
 package com.javacli.agent;
 
-import com.javacli.llm.GLMClient;
+import com.javacli.llm.LlmClient;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayOutputStream;
@@ -16,7 +16,7 @@ class AgentStreamRendererTest {
 
     @Test
     void shouldNotPrintEmptyReasoningHeadingBeforeTextIsFlushable() throws Exception {
-        GLMClient.StreamListener renderer = newStreamRenderer();
+        LlmClient.StreamListener renderer = newStreamRenderer();
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         PrintStream originalOut = System.out;
         try {
@@ -39,7 +39,7 @@ class AgentStreamRendererTest {
 
     @Test
     void shouldIgnoreWhitespaceOnlyReasoningAcrossIterationReset() throws Exception {
-        GLMClient.StreamListener renderer = newStreamRenderer();
+        LlmClient.StreamListener renderer = newStreamRenderer();
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         PrintStream originalOut = System.out;
         try {
@@ -57,7 +57,7 @@ class AgentStreamRendererTest {
 
     @Test
     void shouldPrintReasoningHeadingOnlyOnceAcrossToolIterations() throws Exception {
-        GLMClient.StreamListener renderer = newStreamRenderer();
+        LlmClient.StreamListener renderer = newStreamRenderer();
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         PrintStream originalOut = System.out;
         try {
@@ -78,11 +78,11 @@ class AgentStreamRendererTest {
                 "同一次 ReAct 运行中工具调用前后的 reasoning 应归到同一个思考区: " + rendered);
     }
 
-    private GLMClient.StreamListener newStreamRenderer() throws Exception {
+    private LlmClient.StreamListener newStreamRenderer() throws Exception {
         Class<?> rendererClass = Class.forName("com.javacli.agent.Agent$StreamRenderer");
         Constructor<?> constructor = rendererClass.getDeclaredConstructor();
         constructor.setAccessible(true);
-        return (GLMClient.StreamListener) constructor.newInstance();
+        return (LlmClient.StreamListener) constructor.newInstance();
     }
 
     private void invokeNoArg(Object target, String methodName) throws Exception {

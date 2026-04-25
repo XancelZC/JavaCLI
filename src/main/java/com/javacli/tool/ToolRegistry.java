@@ -260,9 +260,9 @@ public class ToolRegistry {
     /**
      * 获取所有工具定义（用于LLM）
      */
-    public List<com.javacli.llm.GLMClient.Tool> getToolDefinitions() {
+    public List<com.javacli.llm.LlmClient.Tool> getToolDefinitions() {
         return tools.values().stream()
-                .map(t -> new com.javacli.llm.GLMClient.Tool(t.name(), t.description(), t.parameters()))
+                .map(t -> new com.javacli.llm.LlmClient.Tool(t.name(), t.description(), t.parameters()))
                 .toList();
     }
 
