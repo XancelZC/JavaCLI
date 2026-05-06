@@ -148,8 +148,24 @@ class McpClientTest {
 
         String result = client.callTool("snap", "{}");
         assertTrue(result.contains("[此工具返回了 image"));
+        assertTrue(result.contains("take_snapshot"));
         assertTrue(result.contains("[此工具返回了 resource"));
         client.close();
+    }
+
+    @Test
+    void initializeTimeoutCanBeOverriddenBySystemProperty() {
+        String previous = System.getProperty("javacli.mcp.initialize.timeout.seconds");
+        try {
+            System.setProperty("javacli.mcp.initialize.timeout.seconds", "17");
+            assertEquals(17, McpClient.initializeTimeoutSeconds());
+        } finally {
+            if (previous == null) {
+                System.clearProperty("javacli.mcp.initialize.timeout.seconds");
+            } else {
+                System.setProperty("javacli.mcp.initialize.timeout.seconds", previous);
+            }
+        }
     }
 
     @Test
