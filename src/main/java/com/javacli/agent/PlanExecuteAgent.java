@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.javacli.context.TokenUsageFormatter;
 import com.javacli.llm.LlmClient;
+import com.javacli.lsp.LspDiagnosticReport;
 import com.javacli.memory.ConversationHistoryCompactor;
 import com.javacli.memory.MemoryManager;
 import com.javacli.plan.*;
@@ -485,6 +486,7 @@ public class PlanExecuteAgent {
             iteration++;
 
             // 调 LLM 前评估 messages 是否接近 window 上限；超阈值压缩早期消息为摘要。
+            injectPendingLspDiagnostics(messages, out);
             maybeCompactHistory(messages, out);
 
             LlmClient.ChatResponse response = llmClient.chat(
@@ -567,6 +569,16 @@ public class PlanExecuteAgent {
             log.warn("Failed to build external context for plan task", e);
             return "";
         }
+    }
+
+    private void injectPendingLspDiagnostics(List<LlmClient.Message> messages, PrintStream out) {
+        LspDiagnosticReport report = toolRegistry.flushPendingLspDiagnostics();
+        if (report == null || report.isEmpty()) {
+            return;
+        }
+        messages.add(LlmClient.Message.user(report.promptText()));
+        out.println(report.displayText());
+        log.info("Injected LSP diagnostics into plan task conversation");
     }
 
     private String preview(String content, int maxLength) {
