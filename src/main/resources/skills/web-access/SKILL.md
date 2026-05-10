@@ -29,7 +29,7 @@ tags: [web, browser, fetch]
 | 微信公众号 / 知乎专栏 / Twitter / 小红书 | 直接走 chrome-devtools MCP | 不要先 web_fetch（90% 失败） |
 | 需要登录态（GitHub 私仓、内部系统、邮箱） | `/browser connect` 切 shared 后再操作 | — |
 | 表单交互（点击 / 填写 / 提交） | `mcp__chrome-devtools__click` / `fill` / `fill_form` | — |
-| 用户明确要看页面截图 | `take_screenshot` | LLM 看不到图，要向用户口述要点 |
+| 用户明确要看页面截图 | `take_screenshot` | vision 模型可看图；非 vision 模型只能拿到 fallback 文案 |
 
 ## 浏览器优先级
 
@@ -46,7 +46,7 @@ tags: [web, browser, fetch]
 **关键约束**：
 - shared 模式下敏感页面（settings / admin / billing / oauth / 2fa 等）的改写型工具会强制单步审批，不能批量放行。
 - `close_page` 只能关 JavaCLI 自己 `new_page` 出来的 tab，不要尝试关用户原有的 Gmail / Slack。
-- 浏览器读页面优先 `take_snapshot`（结构化 DOM 文本）而非 `take_screenshot`（图像 LLM 看不到）。
+- 浏览器读页面优先 `take_snapshot`（结构化 DOM 文本）而非 `take_screenshot`。截图只在用户明确要看视觉布局、颜色、遮挡、截图验收时使用；vision 模型会收到图片，非 vision 模型仍只能走 fallback 文案。
 
 ## Jina Reader 兜底
 
@@ -104,7 +104,7 @@ navigate_page → wait_for（等关键元素出现）→ take_snapshot → 抽�
 ## 不要做的事
 
 - 不要在 SPA 站点反复 `web_fetch`：第一次空了就换浏览器，别浪费配额
-- 不要默认 `take_screenshot`：截图 LLM 看不到，浪费 token，先用 snapshot
+- 不要默认 `take_screenshot`：截图比 DOM 文本更贵，先用 snapshot；只有视觉问题再截图
 - 不要为了"全面"在敏感页面批量操作：每个改写型操作都强制审批，会卡住流程
 - 不要替用户输用户名密码：JavaCLI 不做自动登录
 - 不要把 references/ 写回 jar 缓存目录：写到 `~/.javacli/skills/web-access/references/site-patterns/` 用户级目录
