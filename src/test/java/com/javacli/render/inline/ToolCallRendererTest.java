@@ -26,6 +26,28 @@ class ToolCallRendererTest {
     }
 
     @Test
+    void singleWebSearchCollapsedHeaderShowsQuery() {
+        var grouped = ToolCallRenderer.group(List.of(
+                tc("web_search", "{\"query\":\"xancelzc 程序员 博主\"}")));
+
+        String header = ToolCallRenderer.collapsedHeader(grouped);
+
+        assertTrue(header.contains("WebSearch"), header);
+        assertTrue(header.contains("xancelzc 程序员 博主"), header);
+    }
+
+    @Test
+    void singleWebFetchCollapsedHeaderShowsUrl() {
+        var grouped = ToolCallRenderer.group(List.of(
+                tc("web_fetch", "{\"url\":\"https://www.xancelzc.com/about\"}")));
+
+        String header = ToolCallRenderer.collapsedHeader(grouped);
+
+        assertTrue(header.contains("WebFetch"), header);
+        assertTrue(header.contains("www.xancelzc.com/about"), header);
+    }
+
+    @Test
     void multipleGroupsCollapsedShowsTotalCount() {
         var grouped = ToolCallRenderer.group(List.of(
                 tc("read_file", "{}"),
