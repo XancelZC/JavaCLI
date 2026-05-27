@@ -42,6 +42,12 @@ public class DeepSeekClient extends AbstractOpenAiCompatibleClient {
     }
 
     @Override
+    protected boolean shouldSendReasoningContentInRequestHistory() {
+        return true;
+    }
+
+
+    @Override
     public int maxContextWindow() {
         return 1_000_000;
     }
