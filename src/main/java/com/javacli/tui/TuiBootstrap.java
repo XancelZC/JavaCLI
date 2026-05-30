@@ -51,7 +51,7 @@ public final class TuiBootstrap {
         if (!isTuiRequested()) {
             return false;
         }
-        try (Terminal terminal = TerminalBuilder.builder().system(true).dumb(true).build()) {
+        try (Terminal terminal = TerminalBuilder.builder().system(true).dumb(true).encoding(java.nio.charset.StandardCharsets.UTF_8).build()) {
             return shouldUseTui(terminal);
         } catch (IOException e) {
             System.err.println("⚠️ 已显式启用 TUI，但终端检测失败，降级到 CLI 模式: " + e.getMessage());

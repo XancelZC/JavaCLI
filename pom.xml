@@ -58,6 +58,13 @@
             <classifier>jdk11</classifier>
         </dependency>
 
+        <!-- Windows Native Terminal support for JLine -->
+        <dependency>
+            <groupId>net.java.dev.jna</groupId>
+            <artifactId>jna</artifactId>
+            <version>5.14.0</version>
+        </dependency>
+
         <!-- 中文分词 -->
         <dependency>
             <groupId>com.huaban</groupId>

@@ -358,6 +358,17 @@ public class Agent {
     }
 
     /**
+     * 设置/恢复对话历史（快照恢复专用）
+     */
+    public void setConversationHistory(List<LlmClient.Message> history) {
+        if (history == null) {
+            return;
+        }
+        this.conversationHistory.clear();
+        this.conversationHistory.addAll(history);
+    }
+
+    /**
      * 获取记忆管理器
      */
     public MemoryManager getMemoryManager() {
