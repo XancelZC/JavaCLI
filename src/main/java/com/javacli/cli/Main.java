@@ -203,7 +203,7 @@ public class Main {
         }
         AtomicReference<LlmClient> llmClientRef = new AtomicReference<>(llmClient);
 
-        try (Terminal terminal = TerminalBuilder.builder().system(true).dumb(true).build()) {
+        try (Terminal terminal = TerminalBuilder.builder().system(true).dumb(true).encoding(java.nio.charset.StandardCharsets.UTF_8).build()) {
             TerminalHitlHandler terminalHitlHandler = new TerminalHitlHandler(false);
             SwitchableHitlHandler hitlHandler = new SwitchableHitlHandler(terminalHitlHandler);
             HitlToolRegistry hitlToolRegistry = new HitlToolRegistry(hitlHandler);
@@ -1589,7 +1589,11 @@ public class Main {
         if (restarted != null && restarted.status() == McpServerStatus.READY) {
             browserSession.switchToShared("autoConnect");
             hitlHandler.clearApprovedAllForServer("chrome-devtools");
-            return "🔄 已用 --autoConnect 连接 Chrome（需已在 chrome://inspect/#remote-debugging 允许远程调试）\n" + result;
+            return "🔄 已用 --autoConnect 连接 Chrome（需已在 chrome://inspect/#remote-debugging 允许远程调试）\n" + result + "\n" +
+                    "⚠️ 注意：若您连接的是平时日常使用的 Chrome（内含大量标签页），Chrome 144+ 可能会对每个后台标签页都弹出安全控制确认，或者因标签页休眠导致 CDP 挂起。\n" +
+                    "💡 推荐方案：建议使用独立的调试 Chrome 实例进行连接，避免干扰。启动命令：\n" +
+                    "   Windows: start chrome.exe --remote-debugging-port=9222 --user-data-dir=%TEMP%\\javacli-chrome-profile\n" +
+                    "   启动后在其中登录知乎等网站，然后再执行 /browser connect 9222 进行连接。";
         }
         mcpServerManager.restartWithArgs("chrome-devtools", oldArgs);
         return "❌ autoConnect 连接失败，已回滚 chrome-devtools 启动参数：\n" + result
@@ -1621,7 +1625,11 @@ public class Main {
         if (restarted != null && restarted.status() == McpServerStatus.READY) {
             browserSession.switchToShared(probe.browserUrl());
             hitlHandler.clearApprovedAllForServer("chrome-devtools");
-            return "🔄 切换 chrome-devtools server 到 shared 模式 (" + probe.browserUrl() + ")\n" + result;
+            return "🔄 切换 chrome-devtools server 到 shared 模式 (" + probe.browserUrl() + ")\n" + result + "\n" +
+                    "⚠️ 注意：若您连接的是日常使用的 Chrome（内含大量标签页），Chrome 144+ 可能会对每个后台标签页都弹出安全控制确认，或者因标签页休眠导致 CDP 命令挂起。\n" +
+                    "💡 推荐方案：建议使用独立的调试 Chrome 实例进行连接以确保稳定。您可以用以下命令启动它：\n" +
+                    "   Windows: start chrome.exe --remote-debugging-port=" + port + " --user-data-dir=%TEMP%\\javacli-chrome-profile\n" +
+                    "   然后在该独立窗口中登录所需账号，再连接本 CLI。";
         }
         mcpServerManager.restartWithArgs("chrome-devtools", oldArgs);
         return "❌ shared 模式切换失败，已回滚 chrome-devtools 启动参数：\n" + result;

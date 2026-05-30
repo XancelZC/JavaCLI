@@ -323,4 +323,15 @@ class CliCommandParserTest {
         assertEquals(CliCommandParser.CommandType.SKILL_OFF, off.type());
         assertEquals("verbose-debug", off.payload());
     }
+
+    @Test
+    void parsesResumeCommands() {
+        CliCommandParser.ParsedCommand empty = CliCommandParser.parse("/resume");
+        assertEquals(CliCommandParser.CommandType.RESUME, empty.type());
+        assertNull(empty.payload());
+
+        CliCommandParser.ParsedCommand payload = CliCommandParser.parse("/resume 2");
+        assertEquals(CliCommandParser.CommandType.RESUME, payload.type());
+        assertEquals("2", payload.payload());
+    }
 }
