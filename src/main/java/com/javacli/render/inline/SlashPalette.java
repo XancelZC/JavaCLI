@@ -105,10 +105,10 @@ public final class SlashPalette {
             int b = terminal.reader().read();
             if (b == 27) {
                 // ESC 或 ESC + 控制序列
-                int next = terminal.reader().read(50);
+                int next = terminal.reader().read(200);
                 if (next < 0) return KEY_ESC;
-                if (next == '[') {
-                    int third = terminal.reader().read(50);
+                if (next == '[' || next == 'O') {
+                    int third = terminal.reader().read(100);
                     return switch (third) {
                         case 'A' -> KEY_UP;
                         case 'B' -> KEY_DOWN;

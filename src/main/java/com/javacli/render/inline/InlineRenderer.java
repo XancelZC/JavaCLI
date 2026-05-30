@@ -578,6 +578,11 @@ public final class InlineRenderer implements Renderer {
             LineReader reader = activePrintAboveReader();
             if (reader != null) {
                 StringBuilder snapshot = new StringBuilder();
+                if (renderedRows > 0) {
+                    snapshot.append(AnsiSeq.moveUp(renderedRows));
+                    snapshot.append("\r");
+                    snapshot.append(AnsiSeq.CLEAR_TO_EOS);
+                }
                 int rowsAfter = 0;
                 for (TranscriptEntry entry : transcript) {
                     String rendered = entry.render();

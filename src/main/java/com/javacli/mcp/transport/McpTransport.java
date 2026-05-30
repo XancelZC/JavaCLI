@@ -23,6 +23,8 @@ public interface McpTransport extends AutoCloseable {
         return "unknown";
     }
 
+    default void onClose(Runnable callback) {}
+
     @Override
     void close();
 }

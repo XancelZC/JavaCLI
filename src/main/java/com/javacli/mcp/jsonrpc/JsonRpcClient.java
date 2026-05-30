@@ -33,6 +33,7 @@ public class JsonRpcClient implements AutoCloseable {
     public JsonRpcClient(McpTransport transport) {
         this.transport = transport;
         this.transport.onReceive(this::handleMessage);
+        this.transport.onClose(this::handleClose);
     }
 
     public JsonNode request(String method, JsonNode params) throws IOException {
@@ -109,6 +110,15 @@ public class JsonRpcClient implements AutoCloseable {
             return;
         }
         future.complete(message.get("result"));
+    }
+
+    private void handleClose() {
+        for (Long id : pending.keySet()) {
+            CompletableFuture<JsonNode> future = pending.remove(id);
+            if (future != null) {
+                future.completeExceptionally(new IOException("MCP transport closed"));
+            }
+        }
     }
 
     @Override

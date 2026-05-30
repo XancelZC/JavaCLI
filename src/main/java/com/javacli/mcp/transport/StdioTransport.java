@@ -28,10 +28,23 @@ public class StdioTransport implements McpTransport {
     private final ArrayDeque<String> stderrRing = new ArrayDeque<>();
     private final Object stderrLock = new Object();
     private volatile boolean closed;
+    private final List<Runnable> closeListeners = new CopyOnWriteArrayList<>();
 
     public StdioTransport(String command, List<String> args, Map<String, String> env, Path workingDir) throws IOException {
         List<String> commandLine = new ArrayList<>();
-        commandLine.add(command);
+        String resolvedCommand = command;
+        if (System.getProperty("os.name").toLowerCase().contains("win")) {
+            if ("npx".equalsIgnoreCase(command)) {
+                resolvedCommand = "npx.cmd";
+            } else if ("npm".equalsIgnoreCase(command)) {
+                resolvedCommand = "npm.cmd";
+            } else if ("pnpm".equalsIgnoreCase(command)) {
+                resolvedCommand = "pnpm.cmd";
+            } else if ("yarn".equalsIgnoreCase(command)) {
+                resolvedCommand = "yarn.cmd";
+            }
+        }
+        commandLine.add(resolvedCommand);
         if (args != null) {
             commandLine.addAll(args);
         }
@@ -83,8 +96,24 @@ public class StdioTransport implements McpTransport {
     }
 
     @Override
+    public void onClose(Runnable callback) {
+        if (callback != null) {
+            closeListeners.add(callback);
+        }
+    }
+
+    @Override
     public void close() {
+        if (closed) {
+            return;
+        }
         closed = true;
+        for (Runnable callback : closeListeners) {
+            try {
+                callback.run();
+            } catch (Exception ignored) {
+            }
+        }
         // 关 stdin 让子进程读到 EOF，给一次优雅退出窗口（1 秒）。
         // shutdown 通知由 McpClient.close 在调本方法之前发出，子进程拿到 EOF 后通常会立即退出。
         try {
@@ -121,15 +150,22 @@ public class StdioTransport implements McpTransport {
                     if (line.isBlank()) {
                         continue;
                     }
-                    JsonNode message = MAPPER.readTree(line);
-                    for (Consumer<JsonNode> listener : listeners) {
-                        listener.accept(message);
+                    try {
+                        JsonNode message = MAPPER.readTree(line);
+                        for (Consumer<JsonNode> listener : listeners) {
+                            listener.accept(message);
+                        }
+                    } catch (Exception e) {
+                        appendStderr("[javacli] stdout reader ignored non-JSON line: " + line + " (error: " + e.getMessage() + ")");
                     }
                 }
             } catch (Exception e) {
                 appendStderr("[javacli] stdout reader stopped: " + e.getMessage());
+            } finally {
+                close();
             }
         }, "javacli-mcp-stdio-stdout");
+
         thread.setDaemon(true);
         thread.start();
     }

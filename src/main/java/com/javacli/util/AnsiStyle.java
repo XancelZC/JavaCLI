@@ -33,7 +33,7 @@ public final class AnsiStyle {
     }
 
     public static String subtle(String text) {
-        return wrap(DIM + GRAY, text);
+        return wrap(GRAY, text);
     }
 
     public static String thinking(String text) {
@@ -63,7 +63,8 @@ public final class AnsiStyle {
         if (!ENABLED) {
             return line.stripTrailing();
         }
-        return BG_PANEL + PURPLE + prefix + RESET + BG_PANEL + safe + " ".repeat(padding) + RESET;
+        String textColor = "\u001B[38;5;250m";
+        return BG_PANEL + PURPLE + prefix + textColor + safe + " ".repeat(padding) + RESET;
     }
 
     public static String codeLabel(String text) {
