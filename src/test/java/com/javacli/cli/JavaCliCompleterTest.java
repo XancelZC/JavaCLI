@@ -61,6 +61,32 @@ class JavaCliCompleterTest {
     }
 
     @Test
+    void completesModelCandidatesWithReadinessAnnotations() {
+        JavaCliCompleter completer = new JavaCliCompleter(List::of);
+        List<Candidate> candidates = new ArrayList<>();
+
+        completer.complete(null, parsed("/model ", ""), candidates);
+
+        assertTrue(candidates.stream().anyMatch(c -> c.value().equals("glm-5.1")));
+        assertTrue(candidates.stream().anyMatch(c -> c.value().equals("deepseek")));
+        assertTrue(candidates.stream().anyMatch(c -> c.value().equals("step")));
+        assertTrue(candidates.stream().anyMatch(c -> c.value().equals("openai")));
+        assertTrue(candidates.stream().anyMatch(c -> c.value().equals("ollama")));
+        assertTrue(candidates.stream().anyMatch(c -> c.descr().contains("GLM-5.1")));
+    }
+
+    @Test
+    void completesOpenAiAndOllamaModelOptions() {
+        JavaCliCompleter completer = new JavaCliCompleter(List::of);
+        List<Candidate> candidates = new ArrayList<>();
+
+        completer.complete(null, parsed("/model o", "o"), candidates);
+
+        assertTrue(candidates.stream().anyMatch(c -> c.value().equals("openai")));
+        assertTrue(candidates.stream().anyMatch(c -> c.value().equals("ollama")));
+    }
+
+    @Test
     void completesMcpServerNamesFromResources() {
         JavaCliCompleter completer = new JavaCliCompleter(() -> List.of(
                 new McpResourceDescriptor("chrome-devtools", "file:///a", "a", "", "", "text/plain", null),
@@ -132,6 +158,36 @@ class JavaCliCompleterTest {
         completer.complete(null, parsed("@image:pom", "@image:pom"), candidates);
 
         assertTrue(candidates.stream().anyMatch(c -> c.value().equals("@image:pom.xml")));
+    }
+
+    @Test
+    void completesModelSubcommands() {
+        JavaCliCompleter completer = new JavaCliCompleter(List::of);
+        List<Candidate> candidates = new ArrayList<>();
+
+        completer.complete(null, parsed("/model ", ""), candidates);
+
+        assertTrue(candidates.stream().anyMatch(c -> c.value().equals("key ")));
+        assertTrue(candidates.stream().anyMatch(c -> c.value().equals("url ")));
+        assertTrue(candidates.stream().anyMatch(c -> c.value().equals("config ")));
+        assertTrue(candidates.stream().anyMatch(c -> c.value().equals("show")));
+    }
+
+    @Test
+    void completesModelProviderOptionsForSubcommands() {
+        JavaCliCompleter completer = new JavaCliCompleter(List::of);
+        List<Candidate> candidates = new ArrayList<>();
+
+        completer.complete(null, parsed("/model key ", ""), candidates);
+
+        assertTrue(candidates.stream().anyMatch(c -> c.value().equals("deepseek")));
+        assertTrue(candidates.stream().anyMatch(c -> c.value().equals("glm")));
+        assertTrue(candidates.stream().anyMatch(c -> c.value().equals("openai")));
+        assertTrue(candidates.stream().anyMatch(c -> c.value().equals("custom")));
+
+        candidates.clear();
+        completer.complete(null, parsed("/model url d", "d"), candidates);
+        assertTrue(candidates.stream().anyMatch(c -> c.value().equals("deepseek")));
     }
 
     private static Skill skill(String name, String description) {

@@ -5,6 +5,7 @@ final class CliCommandParser {
     enum CommandType {
         NONE,
         UNKNOWN_COMMAND,
+        HELP,
         CANCEL,
         EXIT,
         CLEAR,
@@ -64,6 +65,13 @@ final class CliCommandParser {
             return ParsedCommand.none();
         }
 
+        if (trimmed.equalsIgnoreCase("/help")
+                || trimmed.equalsIgnoreCase("help")
+                || trimmed.equalsIgnoreCase("/?")
+                || trimmed.equalsIgnoreCase("?")) {
+            return new ParsedCommand(CommandType.HELP, null);
+        }
+
         if (trimmed.equalsIgnoreCase("/exit")
                 || trimmed.equalsIgnoreCase("/quit")
                 || trimmed.equalsIgnoreCase("exit")
@@ -83,12 +91,16 @@ final class CliCommandParser {
             return new ParsedCommand(CommandType.HISTORY_CLEAR, null);
         }
 
-        if (trimmed.equalsIgnoreCase("/model")) {
+        if (trimmed.equalsIgnoreCase("/model") || trimmed.equalsIgnoreCase("/models")) {
             return new ParsedCommand(CommandType.SWITCH_MODEL, null);
         }
 
         if (trimmed.regionMatches(true, 0, "/model ", 0, 7)) {
             return new ParsedCommand(CommandType.SWITCH_MODEL, trimmed.substring(7).trim());
+        }
+
+        if (trimmed.regionMatches(true, 0, "/models ", 0, 8)) {
+            return new ParsedCommand(CommandType.SWITCH_MODEL, trimmed.substring(8).trim());
         }
 
         if (trimmed.equalsIgnoreCase("/plan")) {

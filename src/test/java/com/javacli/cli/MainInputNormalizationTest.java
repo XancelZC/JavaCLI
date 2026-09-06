@@ -57,9 +57,9 @@ class MainInputNormalizationTest {
         List<String> lines = Main.startupBannerLines();
 
         assertTrue(lines.stream().anyMatch(line -> line.contains("JavaCLI")));
-        assertTrue(lines.stream().anyMatch(line -> line.contains("π")));
+        assertTrue(lines.stream().anyMatch(line -> line.contains("X")));
         assertTrue(lines.stream().anyMatch(line -> line.contains("v16.1.0")));
-        assertTrue(lines.stream().anyMatch(line -> line.contains("████████")));
+        assertTrue(lines.stream().anyMatch(line -> line.contains("████")));
         assertTrue(lines.stream().anyMatch(line -> line.contains("Tips for getting started")));
         assertTrue(lines.stream().anyMatch(line -> line.contains("@path")));
         assertTrue(lines.stream().noneMatch(line -> line.contains("for shortcuts")));

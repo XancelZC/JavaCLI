@@ -76,11 +76,58 @@ class LlmClientFactoryTest {
     }
 
     @Test
-    void returnsNullForUnknownProvider() {
+    void createsOpenAiClientFromConfig() {
+        JavaCliConfig config = new JavaCliConfig();
+        config.getProviders().put("openai", new JavaCliConfig.ProviderConfig("sk-test", "https://api.openai.com/v1", "gpt-4o"));
+
+        LlmClient client = LlmClientFactory.create("openai", config);
+        GenericOpenAiClient openAiClient = assertInstanceOf(GenericOpenAiClient.class, client);
+        assertEquals("openai", openAiClient.getProviderName());
+        assertEquals("gpt-4o", openAiClient.getModelName());
+    }
+
+    @Test
+    void createsOllamaClientEvenWithoutApiKey() {
+        JavaCliConfig config = new JavaCliConfig();
+        config.getProviders().put("ollama", new JavaCliConfig.ProviderConfig(null, "http://localhost:11434/v1", "llama3"));
+
+        LlmClient client = LlmClientFactory.create("ollama", config);
+        GenericOpenAiClient ollamaClient = assertInstanceOf(GenericOpenAiClient.class, client);
+        assertEquals("ollama", ollamaClient.getProviderName());
+        assertEquals("llama3", ollamaClient.getModelName());
+    }
+
+    @Test
+    void createsCustomOpenAiCompatibleClient() {
+        JavaCliConfig config = new JavaCliConfig();
+        config.getProviders().put("custom", new JavaCliConfig.ProviderConfig("custom-key", "https://api.siliconflow.cn/v1", "deepseek-ai/DeepSeek-V3"));
+
+        LlmClient client = LlmClientFactory.create("custom", config);
+        GenericOpenAiClient customClient = assertInstanceOf(GenericOpenAiClient.class, client);
+        assertEquals("custom", customClient.getProviderName());
+        assertEquals("deepseek-ai/DeepSeek-V3", customClient.getModelName());
+        assertEquals("https://api.siliconflow.cn/v1/chat/completions", customClient.getApiUrl());
+    }
+
+    @Test
+    void returnsNullForUnknownProviderWithoutBaseUrl() {
         JavaCliConfig config = new JavaCliConfig();
         config.getProviders().put("unknown", new JavaCliConfig.ProviderConfig("test-key", null, "unknown-model"));
 
         assertNull(LlmClientFactory.create("unknown", config));
+    }
+
+    @Test
+    void createsGenericClientForThirdPartyProviderWithBaseUrl() {
+        JavaCliConfig config = new JavaCliConfig();
+        config.getProviders().put("sensenova",
+                new JavaCliConfig.ProviderConfig("test-key", "https://token.sensenova.cn/v1", "deepseek-v4-flash"));
+
+        LlmClient client = LlmClientFactory.create("sensenova", config);
+        GenericOpenAiClient genericClient = assertInstanceOf(GenericOpenAiClient.class, client);
+        assertEquals("sensenova", genericClient.getProviderName());
+        assertEquals("deepseek-v4-flash", genericClient.getModelName());
+        assertEquals("https://token.sensenova.cn/v1/chat/completions", genericClient.getApiUrl());
     }
 
     private static String expectedStepChatUrl(String baseUrl) {

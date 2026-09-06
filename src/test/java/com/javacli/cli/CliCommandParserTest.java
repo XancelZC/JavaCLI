@@ -85,6 +85,14 @@ class CliCommandParserTest {
     }
 
     @Test
+    void parsesHelpCommand() {
+        assertEquals(CliCommandParser.CommandType.HELP, CliCommandParser.parse("/help").type());
+        assertEquals(CliCommandParser.CommandType.HELP, CliCommandParser.parse("help").type());
+        assertEquals(CliCommandParser.CommandType.HELP, CliCommandParser.parse("/?").type());
+        assertEquals(CliCommandParser.CommandType.HELP, CliCommandParser.parse("?").type());
+    }
+
+    @Test
     void parsesExitSlashCommand() {
         CliCommandParser.ParsedCommand command = CliCommandParser.parse("/exit");
 
@@ -333,5 +341,26 @@ class CliCommandParserTest {
         CliCommandParser.ParsedCommand payload = CliCommandParser.parse("/resume 2");
         assertEquals(CliCommandParser.CommandType.RESUME, payload.type());
         assertEquals("2", payload.payload());
+    }
+
+    @Test
+    void parsesModelsAliasAndSlashSyntax() {
+        CliCommandParser.ParsedCommand empty = CliCommandParser.parse("/models");
+        assertEquals(CliCommandParser.CommandType.SWITCH_MODEL, empty.type());
+        assertNull(empty.payload());
+
+        CliCommandParser.ParsedCommand withTarget = CliCommandParser.parse("/models sensenova/deepseek-v4-flash");
+        assertEquals(CliCommandParser.CommandType.SWITCH_MODEL, withTarget.type());
+        assertEquals("sensenova/deepseek-v4-flash", withTarget.payload());
+
+        Main.ModelSelection sel = Main.resolveModelSelection("sensenova/deepseek-v4-flash");
+        assertEquals("sensenova", sel.provider());
+        assertEquals("deepseek-v4-flash", sel.model());
+        assertEquals(true, sel.explicitModel());
+
+        Main.ModelSelection selSpace = Main.resolveModelSelection("deepseek deepseek-chat");
+        assertEquals("deepseek", selSpace.provider());
+        assertEquals("deepseek-chat", selSpace.model());
+        assertEquals(true, selSpace.explicitModel());
     }
 }

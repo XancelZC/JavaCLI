@@ -57,6 +57,8 @@ import org.jline.reader.EndOfFileException;
 import org.jline.reader.History;
 import org.jline.reader.UserInterruptException;
 import org.jline.reader.Reference;
+import org.jline.reader.Binding;
+import org.jline.reader.Widget;
 import org.jline.utils.NonBlockingReader;
 import org.jline.utils.AttributedString;
 import org.jline.widget.AutosuggestionWidgets;
@@ -73,9 +75,14 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+import java.util.function.Consumer;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CountDownLatch;
@@ -85,6 +92,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import com.javacli.llm.ModelDiscoveryService;
+import com.javacli.render.inline.SlashSuggestionItem;
 
 /**
  * JavaCLI v16.1.0 - Terminal-First Agent IDE
@@ -186,6 +195,17 @@ public class Main {
 
     public static void main(String[] args) {
         configureAwtForCli();
+        if (args != null && args.length > 0) {
+            String first = args[0].trim();
+            if ("-v".equalsIgnoreCase(first) || "--version".equalsIgnoreCase(first)) {
+                System.out.println("JavaCLI X v" + VERSION);
+                return;
+            }
+            if ("-h".equalsIgnoreCase(first) || "--help".equalsIgnoreCase(first)) {
+                printCliUsage();
+                return;
+            }
+        }
         if (isRuntimeServeCommand(args)) {
             configureLogging();
             startRuntimeApiAndBlock(args);
@@ -232,23 +252,41 @@ public class Main {
                 }
             });
 
+            AtomicReference<Renderer> activeRendererRef = new AtomicReference<>();
+            AtomicReference<SlashSuggestionController> slashControllerRef = new AtomicReference<>();
+            Consumer<String> bufferListener = buffer -> {
+                SlashSuggestionController sc = slashControllerRef.get();
+                if (sc != null) {
+                    sc.onBufferChanged(buffer);
+                }
+            };
+
             LineReader lineReader = LineReaderBuilder.builder()
                     .terminal(terminal)
                     .history(new JavaCliHistory())
                     .completer(new JavaCliCompleter(mcpServerManager::resourceCandidates,
                             () -> skillRegistryRef.get() == null ? List.of() : skillRegistryRef.get().allSkills()))
-                    .highlighter(new JavaCliHighlighter())
+                    .highlighter(new JavaCliHighlighter(bufferListener))
                     .build();
             lineReader.option(LineReader.Option.BRACKETED_PASTE, true);
             lineReader.option(LineReader.Option.AUTO_LIST, true);
             lineReader.option(LineReader.Option.AUTO_MENU, true);
+            lineReader.option(LineReader.Option.AUTO_MENU_LIST, true);
+            lineReader.option(LineReader.Option.AUTO_GROUP, true);
+            lineReader.option(LineReader.Option.CASE_INSENSITIVE, true);
+            lineReader.option(LineReader.Option.LIST_PACKED, true);
             configureHistory(lineReader, Path.of(System.getProperty("user.home")));
+
+            SlashSuggestionController slashController = new SlashSuggestionController(lineReader, activeRendererRef);
+            slashControllerRef.set(slashController);
+            configureSlashCommandWidgets(lineReader, slashController);
             configureSlashCommandHint(lineReader);
             configureJLineInteractiveWidgets(lineReader);
 
             // JLine-first：启动输出、命令输出、Agent 流式内容都走同一条 Renderer.stream() 通道。
             // inline 首屏要挂到 LineReader 首次初始化回调里，避免在 readLine 接管屏幕前用裸输出抢光标。
             Renderer renderer = RendererFactory.create(RendererFactory.resolveMode(), terminal);
+            activeRendererRef.set(renderer);
             RendererHitlHandler rendererHitl = new RendererHitlHandler(renderer, hitlHandler.isEnabled());
             hitlHandler.setDelegate(rendererHitl);
             if (renderer instanceof InlineRenderer inline) {
@@ -337,15 +375,33 @@ public class Main {
             bindCtrlVToClipboardImage(lineReader);
             bindEscToClearInput(lineReader);
 
+            String initialTask = (args != null && args.length > 0) ? String.join(" ", args).trim() : null;
+            boolean isInitialPrompt = initialTask != null && !initialTask.isBlank();
+            long lastInterruptTime = 0;
+
             while (true) {
                 PromptInput promptInput;
-                try {
-                    promptInput = readPromptInput(terminal, lineReader, renderer,
-                            nextTaskUsePlanMode || nextTaskUseTeamMode, spaciousPrompt);
-                } catch (UserInterruptException e) {
-                    continue;  // Ctrl+C 跳过
-                } catch (EndOfFileException e) {
-                    break;  // Ctrl+D 退出
+                if (isInitialPrompt) {
+                    isInitialPrompt = false;
+                    promptInput = PromptInput.submitted(initialTask);
+                } else {
+                    try {
+                        promptInput = readPromptInput(terminal, lineReader, renderer, slashController,
+                                nextTaskUsePlanMode || nextTaskUseTeamMode, spaciousPrompt);
+                        lastInterruptTime = 0;
+                    } catch (UserInterruptException e) {
+                        long now = System.currentTimeMillis();
+                        if (now - lastInterruptTime < 2000) {
+                            ui.println("\n👋 再见!");
+                            renderer.close();
+                            return;
+                        }
+                        lastInterruptTime = now;
+                        ui.println("\n（再次按 Ctrl+C 或输入 /exit 退出）\n");
+                        continue;
+                    } catch (EndOfFileException e) {
+                        break;  // Ctrl+D 退出
+                    }
                 }
                 if (renderer instanceof InlineRenderer inline) {
                     inline.clearAcceptedInput(promptInput.text());
@@ -379,6 +435,10 @@ public class Main {
                 switch (command.type()) {
                     case UNKNOWN_COMMAND -> {
                         ui.println("❌ 未知命令: " + command.payload());
+                        printSlashCommandHelp(ui);
+                        continue;
+                    }
+                    case HELP -> {
                         printSlashCommandHelp(ui);
                         continue;
                     }
@@ -482,35 +542,9 @@ public class Main {
                     }
                     case SWITCH_MODEL -> {
                         String selection = command.payload();
-                        if (selection == null || selection.isEmpty()) {
-                            ui.println("🤖 当前模型: " + llmClient.getModelName() + " (" + llmClient.getProviderName() + ")");
-                            ui.println("   GLM 明确模型：");
-                            ui.println("   /model glm-5.1       - 切换到 GLM-5.1");
-                            ui.println("   /model glm-5v-turbo  - 切换到 GLM-5V-Turbo 多模态");
-                            ui.println("   其它 provider 使用你配置里的具体模型：");
-                            ui.println("   /model deepseek      - 切换到 DeepSeek（读取配置模型）");
-                            ui.println("   /model step          - 切换到 StepFun（读取配置模型）");
-                            ui.println("   /model kimi          - 切换到 Kimi（读取配置模型）\n");
-                        } else {
-                            ModelSelection target = resolveModelSelection(selection);
-                            if (target.explicitModel()) {
-                                ensureProviderConfig(config, target.provider()).setModel(target.model());
-                            }
-                            LlmClient newClient = LlmClientFactory.create(target.provider(), config);
-                            if (newClient == null) {
-                                ui.println("❌ 切换失败：未配置 " + target.provider() + " 的 API Key\n");
-                            } else {
-                                llmClient = newClient;
-                                llmClientRef.set(newClient);
-                                config.setDefaultProvider(target.provider());
-                                config.save();
-                                reactAgent.setLlmClient(llmClient);
-                                ui.println("✅ 已切换到: " + llmClient.getModelName() + " (" + llmClient.getProviderName() + ")");
-                                ui.println("   上下文策略: " + reactAgent.getMemoryManager().getContextProfile().summary());
-                                ui.println("   对话上下文已保留，使用 /clear 可清空\n");
-                                renderer.updateStatus(statusInfo(llmClient, hitlHandler, "idle", mcpServerManager, skillRegistry));
-                            }
-                        }
+                        handleModelCommand(terminal, lineReader, renderer, config, llmClientRef, reactAgent,
+                                mcpServerManager, skillRegistry, hitlHandler, selection);
+                        llmClient = llmClientRef.get();
                         continue;
                     }
                     case SWITCH_HITL -> {
@@ -765,6 +799,23 @@ public class Main {
                 && java.util.Arrays.stream(args).anyMatch("--http"::equalsIgnoreCase);
     }
 
+    static void printCliUsage() {
+        System.out.println("JavaCLI X v" + VERSION + " - A simple Java Agent CLI like Claude Code");
+        System.out.println();
+        System.out.println("用法:");
+        System.out.println("  javacli [选项] [任务内容]");
+        System.out.println();
+        System.out.println("选项:");
+        System.out.println("  -h, --help       显示命令行帮助");
+        System.out.println("  -v, --version    显示版本信息");
+        System.out.println("  serve            启动 Runtime API 守护服务");
+        System.out.println();
+        System.out.println("示例:");
+        System.out.println("  javacli                        启动交互式 Agent 命令行终端");
+        System.out.println("  javacli \"解释 pom.xml 结构\"     直接以该任务启动并进入会话");
+        System.out.println("  javacli /plan \"重构工具执行器\"  直接以 Plan 模式执行任务");
+    }
+
     private static void startRuntimeApiAndBlock(String[] args) {
         JavaCliConfig config = JavaCliConfig.load();
         LlmClient client = LlmClientFactory.createFromConfig(config);
@@ -961,6 +1012,7 @@ public class Main {
     private static PromptInput readPromptInput(Terminal terminal,
                                                LineReader lineReader,
                                                Renderer renderer,
+                                               SlashSuggestionController slashController,
                                                boolean allowEscCancel,
                                                boolean spaciousPrompt)
             throws UserInterruptException, EndOfFileException {
@@ -998,6 +1050,10 @@ public class Main {
 
             return PromptInput.submitted(lineReader.readLine("", rightPrompt, (MaskingCallback) null, prefill.seedBuffer()));
         } finally {
+            if (slashController != null) {
+                slashController.clear();
+            }
+            renderer.clearSlashSuggestions();
             renderer.afterInput();
         }
     }
@@ -1253,7 +1309,13 @@ public class Main {
 
     static List<SlashCommandHint> slashCommandHints() {
         return List.of(
-                new SlashCommandHint("/model", "/model", "查看当前模型"),
+                new SlashCommandHint("/help", "/help", "查看可用命令分组指引"),
+                new SlashCommandHint("/model", "/model", "查看当前模型与交互式切换配置"),
+                new SlashCommandHint("/models", "/models", "OpenCode 风格模型选择弹窗 (Type-to-Search)"),
+                new SlashCommandHint("/model show", "/model show", "查看各供应商配置概况与状态"),
+                new SlashCommandHint("/model key ", "/model key <provider> <key>", "命令行设置供应商 API Key"),
+                new SlashCommandHint("/model url ", "/model url <provider> <url>", "命令行设置供应商 Base URL"),
+                new SlashCommandHint("/model config ", "/model config <provider> ...", "命令行统一配置供应商参数"),
                 new SlashCommandHint("/model glm-5.1", "/model glm-5.1", "切换到 GLM-5.1"),
                 new SlashCommandHint("/model glm-5v-turbo", "/model glm-5v-turbo", "切换到 GLM-5V-Turbo 多模态"),
                 new SlashCommandHint("/model deepseek", "/model deepseek", "切换到 DeepSeek（读取配置模型）"),
@@ -1320,11 +1382,132 @@ public class Main {
     }
 
     private static void printSlashCommandHelp(PrintStream out) {
-        out.println("可用命令：");
-        for (SlashCommandHint hint : slashCommandHints()) {
-            out.println("   " + hint.display() + " - " + hint.description());
-        }
+        out.println(AnsiStyle.emphasis("JavaCLI 可用命令指引："));
         out.println();
+        out.println(AnsiStyle.heading("🎯 任务与执行模式"));
+        out.println("   /plan [任务]                 - 使用 Plan-and-Execute 计划执行模式");
+        out.println("   /team [任务]                 - 使用 Multi-Agent 多智能体协同模式");
+        out.println("   /hitl [on|off]              - 查看或切换危险操作人工审批安全模式");
+        out.println();
+        out.println(AnsiStyle.heading("🧠 上下文与记忆"));
+        out.println("   /context (或 /ctx)          - 查看当前上下文 Token 与预算状态");
+        out.println("   /memory (或 /mem)           - 查看记忆系统状态");
+        out.println("   /memory list                - 查看跨会话长期记忆列表");
+        out.println("   /memory search <关键词>      - 检索当前项目可见长期记忆");
+        out.println("   /memory delete <id>         - 删除指定长期记忆");
+        out.println("   /memory clear               - 清空长期记忆");
+        out.println("   /save [--global] <事实>      - 手动保存项目级或全局长期记忆");
+        out.println("   /clear                      - 清空当前轮次会话上下文");
+        out.println("   /history clear              - 清空本地输入历史记录");
+        out.println();
+        out.println(AnsiStyle.heading("🔍 代码探索与检索"));
+        out.println("   /index [路径]                - 索引指定路径代码库（AST + 语义向量）");
+        out.println("   /search <查询>               - 语义检索代码库（RAG 辅助）");
+        out.println("   /graph <类名>                - 查看类调用与继承依赖关系图谱");
+        out.println();
+        out.println(AnsiStyle.heading("🛡️ 安全、审计与快照"));
+        out.println("   /snapshot [status|clean]    - 查看或清理当前项目 Side-Git 快照");
+        out.println("   /restore <N>                - 回滚到最近第 N 个 pre-turn 快照");
+        out.println("   /policy                     - 查看当前安全与路径访问策略");
+        out.println("   /audit [N]                  - 查看最近 N 条危险工具审计日志");
+        out.println();
+        out.println(AnsiStyle.heading("🔌 生态与模型配置"));
+        out.println("   /model [provider|模型名]     - 交互式选择或直接切换底层模型（支持 OpenAI 兼容格式）");
+        out.println("   /mcp                        - 查看 MCP Servers 状态与工具清单");
+        out.println("   /mcp restart <name>         - 重启指定 MCP Server");
+        out.println("   /mcp logs <name>            - 查看指定 MCP Server 日志");
+        out.println("   /skill [list|show|on|off]   - 查看或管理智能体 Skill 技能");
+        out.println("   /browser [connect|status]   - 查看或连接 Chrome DevTools 浏览器");
+        out.println("   /task [add|cancel|log]      - 管理后台持久化异步任务");
+        out.println("   /config                     - 查看当前系统配置概览");
+        out.println();
+        out.println(AnsiStyle.heading("🚪 快捷命令"));
+        out.println("   /help (或 /?)                - 查看本命令指引");
+        out.println("   /exit (或 /quit)             - 退出程序");
+        out.println();
+    }
+
+    static void configureSlashCommandWidgets(LineReader lineReader, SlashSuggestionController controller) {
+        if (lineReader == null || controller == null) {
+            return;
+        }
+
+        // 1. 方向键上：处于建议态时切换选中项，否则触发默认历史前翻
+        Widget origUp = lineReader.getWidgets().get(LineReader.UP_LINE_OR_HISTORY);
+        Widget origPrev = lineReader.getWidgets().get(LineReader.UP_HISTORY);
+        lineReader.getWidgets().put("javacli-up", () -> {
+            if (controller.isActive()) {
+                controller.selectPrevious();
+                return true;
+            }
+            if (origUp != null) {
+                return origUp.apply();
+            }
+            if (origPrev != null) {
+                return origPrev.apply();
+            }
+            return false;
+        });
+
+        // 2. 方向键下：处于建议态时切换选中项，否则触发默认历史后翻
+        Widget origDown = lineReader.getWidgets().get(LineReader.DOWN_LINE_OR_HISTORY);
+        Widget origNext = lineReader.getWidgets().get(LineReader.DOWN_HISTORY);
+        lineReader.getWidgets().put("javacli-down", () -> {
+            if (controller.isActive()) {
+                controller.selectNext();
+                return true;
+            }
+            if (origDown != null) {
+                return origDown.apply();
+            }
+            if (origNext != null) {
+                return origNext.apply();
+            }
+            return false;
+        });
+
+        // 3. Tab 键：处于建议态时自动补全高亮项
+        Widget origComplete = lineReader.getWidgets().get(LineReader.EXPAND_OR_COMPLETE);
+        lineReader.getWidgets().put("javacli-tab", () -> {
+            if (controller.isActive()) {
+                return controller.applyTab();
+            }
+            return origComplete != null && origComplete.apply();
+        });
+
+        // 4. Enter 键：处于建议态且仅输入了部分前缀时自动对齐高亮命令，然后提交执行
+        Widget origAccept = lineReader.getWidgets().get(LineReader.ACCEPT_LINE);
+        lineReader.getWidgets().put("javacli-enter", () -> {
+            if (controller.isActive()) {
+                controller.applyEnter();
+            }
+            return origAccept != null && origAccept.apply();
+        });
+
+        // 5. Esc 键：处于建议态时取消并折叠建议
+        lineReader.getWidgets().put("javacli-esc", () -> {
+            if (controller.isActive()) {
+                return controller.applyEsc();
+            }
+            return false;
+        });
+
+        Reference upRef = new Reference("javacli-up");
+        Reference downRef = new Reference("javacli-down");
+        Reference tabRef = new Reference("javacli-tab");
+        Reference enterRef = new Reference("javacli-enter");
+        Reference escRef = new Reference("javacli-esc");
+
+        for (String kmName : List.of(LineReader.MAIN, LineReader.EMACS, LineReader.VIINS)) {
+            KeyMap<Binding> km = lineReader.getKeyMaps().get(kmName);
+            if (km != null) {
+                km.bind(upRef, "\u001b[A", "\u001bOA");
+                km.bind(downRef, "\u001b[B", "\u001bOB");
+                km.bind(tabRef, "\t");
+                km.bind(enterRef, "\r", "\n");
+                km.bind(escRef, "\u001b");
+            }
+        }
     }
 
     static void configureSlashCommandHint(LineReader lineReader) {
@@ -1333,6 +1516,7 @@ public class Main {
         }
         lineReader.getWidgets().put("javacli-slash-command-hint", () -> {
             lineReader.getBuffer().write("/");
+            lineReader.callWidget(LineReader.REDISPLAY);
             return true;
         });
         Reference slashHint = new Reference("javacli-slash-command-hint");
@@ -1345,11 +1529,11 @@ public class Main {
         if (lineReader == null) {
             return;
         }
-        new AutosuggestionWidgets(lineReader).enable();
+        AutosuggestionWidgets autosuggestion = new AutosuggestionWidgets(lineReader);
+        autosuggestion.enable();
+        // 启用基于 Completer 的实时幽灵词推荐（对标 Claude Code / OpenCode，输入首字母即刻提示）
+        lineReader.setAutosuggestion(LineReader.SuggestionType.COMPLETER);
         new AutopairWidgets(lineReader).enable();
-        // JLine TailTipWidgets 会通过 Status 预留多行底部区域；如果在首屏前 enable，
-        // banner 前会出现大段空白，输入行下方也会长期空出一块。命令说明后续用
-        // 不预留布局的方式展示，避免破坏 Claude Code / Qoder 风格的 inline 体验。
     }
 
     static LinkedHashMap<String, CmdDesc> slashCommandTailTips() {
@@ -1399,6 +1583,40 @@ public class Main {
         return sb.toString();
     }
 
+    static List<SlashSuggestionItem> findMatchingSlashCommands(String buffer) {
+        if (buffer == null || !buffer.startsWith("/")) {
+            return List.of();
+        }
+        String prefix = buffer.trim().toLowerCase(Locale.ROOT);
+        List<SlashSuggestionItem> result = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+
+        for (SlashCommandHint hint : slashCommandHints()) {
+            String insert = hint.insertText().trim().toLowerCase(Locale.ROOT);
+            String display = hint.display();
+            if ("/".equals(prefix)) {
+                if (!display.contains(" ") || display.equals("/help") || display.equals("/model")
+                        || display.equals("/models")
+                        || display.equals("/plan") || display.equals("/team") || display.equals("/hitl")
+                        || display.equals("/mcp") || display.equals("/skill") || display.equals("/memory")
+                        || display.equals("/context") || display.equals("/clear") || display.equals("/task")
+                        || display.equals("/browser") || display.equals("/snapshot") || display.equals("/config")) {
+                    if (seen.add(hint.insertText().trim())) {
+                        result.add(new SlashSuggestionItem(hint.insertText().trim(), display, hint.description()));
+                    }
+                }
+            } else if (insert.startsWith(prefix) || display.toLowerCase(Locale.ROOT).startsWith(prefix)) {
+                if (seen.add(hint.insertText().trim())) {
+                    result.add(new SlashSuggestionItem(hint.insertText().trim(), display, hint.description()));
+                }
+            }
+            if (result.size() >= 16) {
+                break;
+            }
+        }
+        return result;
+    }
+
     /**
      * /config 命令处理：用 renderer.openPalette 展示当前配置项列表。
      * 当前是只读视图——选中一项后提示对应的 CLI 命令，由用户自己执行。
@@ -1430,6 +1648,1043 @@ public class Main {
             default -> "(unknown)";
         };
         renderer.stream().println(hint);
+    }
+
+    /**
+     * /model 命令处理：支持带参数直接切换，无参数时弹出交互式 Palette 选择器与向导。
+     */
+    static void handleModelCommand(Renderer renderer,
+                                  JavaCliConfig config,
+                                  AtomicReference<LlmClient> llmClientRef,
+                                  Agent reactAgent,
+                                  McpServerManager mcpServerManager,
+                                  com.javacli.skill.SkillRegistry skillRegistry,
+                                  SwitchableHitlHandler hitlHandler,
+                                  String payload) {
+        handleModelCommand(null, null, renderer, config, llmClientRef, reactAgent,
+                mcpServerManager, skillRegistry, hitlHandler, payload);
+    }
+
+    static void handleModelCommand(Terminal terminal,
+                                  LineReader lineReader,
+                                  Renderer renderer,
+                                  JavaCliConfig config,
+                                  AtomicReference<LlmClient> llmClientRef,
+                                  Agent reactAgent,
+                                  McpServerManager mcpServerManager,
+                                  com.javacli.skill.SkillRegistry skillRegistry,
+                                  SwitchableHitlHandler hitlHandler,
+                                  String payload) {
+        PrintStream ui = renderer.stream();
+        if (payload != null && !payload.isBlank()) {
+            String trimmed = payload.trim();
+            String lower = trimmed.toLowerCase(Locale.ROOT);
+
+            // 1. 查看概况: /model show / /model info / /model list
+            if (lower.equals("show") || lower.equals("info") || lower.equals("list")
+                    || lower.startsWith("show ") || lower.startsWith("info ") || lower.startsWith("list ")) {
+                printModelShow(ui, config, llmClientRef, trimmed);
+                return;
+            }
+
+            // 2. 命令行设置 API Key: /model key <provider> <apiKey>
+            if (lower.equals("key") || lower.startsWith("key ") || lower.equals("set-key") || lower.startsWith("set-key ")) {
+                handleModelKeyCommand(terminal, lineReader, ui, config, llmClientRef, reactAgent, renderer, mcpServerManager, skillRegistry, hitlHandler, trimmed);
+                return;
+            }
+
+            // 3. 命令行设置 Base URL: /model url <provider> <baseUrl>
+            if (lower.equals("url") || lower.startsWith("url ") || lower.equals("set-url") || lower.startsWith("set-url ")) {
+                handleModelUrlCommand(terminal, lineReader, ui, config, llmClientRef, reactAgent, renderer, mcpServerManager, skillRegistry, hitlHandler, trimmed);
+                return;
+            }
+
+            // 4. 命令行统一配置: /model config <provider> [--key <key>] [--url <url>] [--model <model>]
+            if (lower.startsWith("config ") || lower.equals("config")) {
+                handleModelConfigCommand(ui, config, llmClientRef, reactAgent, renderer, mcpServerManager, skillRegistry, hitlHandler, trimmed);
+                return;
+            }
+
+            // 5. 带参数标志的模型切换: e.g. /model deepseek deepseek-chat --key sk-...
+            if (trimmed.contains("--key") || trimmed.contains("--url") || trimmed.contains("--model")) {
+                handleModelSwitchWithFlags(ui, config, llmClientRef, reactAgent, renderer, mcpServerManager, skillRegistry, hitlHandler, trimmed);
+                return;
+            }
+
+            // 6. 原生常规切换或打开配置向导
+            ModelSelection target = resolveModelSelection(trimmed);
+            boolean ready = hasConfigured(config, target.provider());
+            if (ready || (terminal != null && lineReader != null)) {
+                switchModelDirect(terminal, lineReader, renderer, config, llmClientRef, reactAgent,
+                        mcpServerManager, skillRegistry, hitlHandler, trimmed);
+            } else {
+                ui.println("[warn] 未检测到 " + target.provider() + " 的有效配置，为您打开配置向导：\n");
+                runModelConfigWizard(terminal, lineReader, renderer, config, llmClientRef, reactAgent,
+                        mcpServerManager, skillRegistry, hitlHandler, target.provider());
+            }
+            return;
+        }
+
+        // OpenCode 风格可搜索交互弹窗（Type-to-Search，对标 anomalyco/opencode 的 dialog-model.tsx）
+        if (terminal != null) {
+            OpenCodeModelPicker.open(terminal, lineReader, renderer, config, llmClientRef,
+                    reactAgent, mcpServerManager, skillRegistry, hitlHandler);
+            return;
+        }
+
+        // 非交互式/无终端环境降级 Palette 选择模式
+        LlmClient currentClient = llmClientRef.get();
+        String currentProvider = currentClient == null ? "" : currentClient.getProviderName().toLowerCase(Locale.ROOT);
+        String currentModel = currentClient == null ? "" : currentClient.getModelName().toLowerCase(Locale.ROOT);
+
+        boolean glmReady = hasApiKey(config, "glm");
+        boolean deepseekReady = hasApiKey(config, "deepseek");
+        boolean stepReady = hasApiKey(config, "step");
+        boolean kimiReady = hasApiKey(config, "kimi");
+        boolean openaiReady = hasApiKey(config, "openai");
+        boolean ollamaReady = hasConfigured(config, "ollama");
+
+        String deepseekModel = config.getModel("deepseek") != null ? config.getModel("deepseek") : "deepseek-chat";
+        String stepModel = config.getModel("step") != null ? config.getModel("step") : "step-3.5-flash";
+        String kimiModel = config.getModel("kimi") != null ? config.getModel("kimi") : "kimi-k2.6";
+        String openaiModel = config.getModel("openai") != null ? config.getModel("openai") : "gpt-4o";
+        String ollamaModel = config.getModel("ollama") != null ? config.getModel("ollama") : "llama3";
+
+        boolean isGlm51 = "glm".equals(currentProvider) && !currentModel.contains("5v");
+        boolean isGlm5v = "glm".equals(currentProvider) && currentModel.contains("5v");
+        boolean isDeepseek = "deepseek".equals(currentProvider);
+        boolean isStep = "step".equals(currentProvider);
+        boolean isKimi = "kimi".equals(currentProvider);
+        boolean isOpenAi = "openai".equals(currentProvider);
+        boolean isOllama = "ollama".equals(currentProvider);
+
+        List<String> items = List.of(
+                (isGlm51 ? "● GLM-5.1 (智谱旗舰, 128k) [当前使用]" : "○ GLM-5.1 (智谱旗舰, 128k)")
+                        + (glmReady ? " [ready]" : " [needs key]"),
+                (isGlm5v ? "● GLM-5V-Turbo (多模态识图) [当前使用]" : "○ GLM-5V-Turbo (多模态识图)")
+                        + (glmReady ? " [ready]" : " [needs key]"),
+                (isDeepseek ? "● DeepSeek (" + deepseekModel + ") [当前使用]" : "○ DeepSeek (" + deepseekModel + ")")
+                        + (deepseekReady ? " [ready]" : " [needs key]"),
+                (isStep ? "● StepFun (" + stepModel + ") [当前使用]" : "○ StepFun (" + stepModel + ")")
+                        + (stepReady ? " [ready]" : " [needs key]"),
+                (isKimi ? "● Kimi (" + kimiModel + ") [当前使用]" : "○ Kimi (" + kimiModel + ")")
+                        + (kimiReady ? " [ready]" : " [needs key]"),
+                (isOpenAi ? "● OpenAI (" + openaiModel + ") [当前使用]" : "○ OpenAI (" + openaiModel + ")")
+                        + (openaiReady ? " [ready]" : " [needs key]"),
+                (isOllama ? "● Ollama 本地 (" + ollamaModel + ") [当前使用]" : "○ Ollama 本地 (" + ollamaModel + ")")
+                        + (ollamaReady ? " [ready]" : " [未配置/默认 11434]"),
+                "+ 配置/添加模型供应商 (输入 URL & Key 自动拉取远程模型列表)",
+                "从当前供应商重新拉取可用模型列表",
+                "查看各供应商配置概况与状态 (/model show)",
+                "查看配置与 Key / Base URL 填报指引"
+        );
+
+        int selected = renderer.openPalette("模型选择 / Model Selection", items);
+        if (selected < 0) {
+            ui.println("[info] 已取消模型切换\n");
+            return;
+        }
+
+        switch (selected) {
+            case 0 -> switchOrConfigure(terminal, lineReader, renderer, config, llmClientRef, reactAgent,
+                    mcpServerManager, skillRegistry, hitlHandler, "glm-5.1", glmReady, "glm");
+            case 1 -> switchOrConfigure(terminal, lineReader, renderer, config, llmClientRef, reactAgent,
+                    mcpServerManager, skillRegistry, hitlHandler, "glm-5v-turbo", glmReady, "glm");
+            case 2 -> switchOrConfigure(terminal, lineReader, renderer, config, llmClientRef, reactAgent,
+                    mcpServerManager, skillRegistry, hitlHandler, "deepseek", deepseekReady, "deepseek");
+            case 3 -> switchOrConfigure(terminal, lineReader, renderer, config, llmClientRef, reactAgent,
+                    mcpServerManager, skillRegistry, hitlHandler, "step", stepReady, "step");
+            case 4 -> switchOrConfigure(terminal, lineReader, renderer, config, llmClientRef, reactAgent,
+                    mcpServerManager, skillRegistry, hitlHandler, "kimi", kimiReady, "kimi");
+            case 5 -> switchOrConfigure(terminal, lineReader, renderer, config, llmClientRef, reactAgent,
+                    mcpServerManager, skillRegistry, hitlHandler, "openai", openaiReady, "openai");
+            case 6 -> switchOrConfigure(terminal, lineReader, renderer, config, llmClientRef, reactAgent,
+                    mcpServerManager, skillRegistry, hitlHandler, "ollama", ollamaReady, "ollama");
+            case 7 -> runModelConfigWizard(terminal, lineReader, renderer, config, llmClientRef, reactAgent,
+                    mcpServerManager, skillRegistry, hitlHandler, null);
+            case 8 -> refreshModelsForCurrentProvider(terminal, lineReader, renderer, config, llmClientRef, reactAgent,
+                    mcpServerManager, skillRegistry, hitlHandler);
+            case 9 -> printModelShow(ui, config, llmClientRef, "show");
+            case 10 -> {
+                printConfigGuide(ui);
+                printCustomOpenAiGuide(ui);
+            }
+            default -> ui.println("(未知选项)\n");
+        }
+    }
+
+    static void printModelShow(PrintStream ui, JavaCliConfig config, AtomicReference<LlmClient> llmClientRef, String payload) {
+        String filter = "";
+        String[] parts = payload.trim().split("\\s+", 2);
+        if (parts.length > 1) {
+            filter = parts[1].trim().toLowerCase(Locale.ROOT);
+        }
+
+        LlmClient currentClient = llmClientRef.get();
+        String currentProvider = currentClient == null ? "" : currentClient.getProviderName().toLowerCase(Locale.ROOT);
+
+        List<String> providers = List.of("deepseek", "glm", "kimi", "step", "openai", "ollama", "custom");
+        if (!filter.isEmpty()) {
+            String f = filter;
+            providers = providers.stream().filter(p -> p.contains(f)).toList();
+            if (providers.isEmpty()) {
+                providers = List.of(filter);
+            }
+        }
+
+        ui.println("┌─ Providers and Models Overview ───────────────────────────────────────────┐");
+        ui.println("│ Provider     Model            Base URL                       API Key      Status │");
+        ui.println("├────────────────────────────────────────────────────────────────────────────┤");
+        for (String p : providers) {
+            String model = config.getModel(p);
+            if (model == null || model.isBlank()) {
+                model = switch (p) {
+                    case "deepseek" -> "deepseek-chat";
+                    case "glm" -> "glm-5.1";
+                    case "kimi" -> "kimi-k2.6";
+                    case "step" -> "step-3.5-flash";
+                    case "openai" -> "gpt-4o";
+                    case "ollama" -> "llama3";
+                    default -> "default";
+                };
+            }
+            String baseUrl = config.getBaseUrl(p);
+            if (baseUrl == null || baseUrl.isBlank()) {
+                baseUrl = switch (p) {
+                    case "deepseek" -> "https://api.deepseek.com/v1";
+                    case "glm" -> "https://open.bigmodel.cn/api/paas/v4";
+                    case "kimi" -> "https://api.moonshot.cn/v1";
+                    case "step" -> "https://api.stepfun.com/v1";
+                    case "openai" -> "https://api.openai.com/v1";
+                    case "ollama" -> "http://localhost:11434/v1";
+                    default -> "(未设置)";
+                };
+            }
+            String apiKey = config.getApiKey(p);
+            String maskedKey = maskApiKey(apiKey);
+            boolean ready = hasConfigured(config, p);
+            boolean isCurrent = p.equals(currentProvider);
+
+            String statusTag = isCurrent ? "● active" : (ready ? "  ready" : "  needs key");
+            ui.printf("│ %-12s %-16s %-30s %-12s %-8s │\n",
+                    truncateOrPad(p, 12),
+                    truncateOrPad(model, 16),
+                    truncateOrPad(baseUrl, 30),
+                    truncateOrPad(maskedKey, 12),
+                    truncateOrPad(statusTag, 8));
+        }
+        ui.println("└────────────────────────────────────────────────────────────────────────────┘");
+        ui.println("Commands:");
+        ui.println("   /model key <provider> <apiKey>   - Set API key for provider");
+        ui.println("   /model url <provider> <baseUrl>  - Set endpoint Base URL for provider");
+        ui.println("   /model config <provider> --key <key> --url <url> --model <model>");
+        ui.println();
+    }
+
+    static void handleModelKeyCommand(Terminal terminal,
+                                      LineReader lineReader,
+                                      PrintStream ui,
+                                      JavaCliConfig config,
+                                      AtomicReference<LlmClient> llmClientRef,
+                                      Agent reactAgent,
+                                      Renderer renderer,
+                                      McpServerManager mcpServerManager,
+                                      com.javacli.skill.SkillRegistry skillRegistry,
+                                      SwitchableHitlHandler hitlHandler,
+                                      String payload) {
+        String[] tokens = payload.trim().split("\\s+", 3);
+        String provider = null;
+        String apiKey = null;
+
+        if (tokens.length >= 3) {
+            provider = tokens[1].trim().toLowerCase(Locale.ROOT);
+            apiKey = cleanQuotes(tokens[2].trim());
+        } else if (tokens.length == 2) {
+            String arg = tokens[1].trim();
+            LlmClient cur = llmClientRef != null ? llmClientRef.get() : null;
+            String defaultProvider = cur != null ? cur.getProviderName().toLowerCase(Locale.ROOT) : (config != null ? config.getDefaultProvider() : "deepseek");
+            boolean isKnownProv = isKnownProviderName(config, arg);
+            if (!isKnownProv && (arg.startsWith("sk-") || arg.length() > 20 || !arg.equals(arg.toLowerCase(Locale.ROOT)))) {
+                // 用户执行的是 /model key <apiKey>，直接绑定到当前活跃供应商
+                provider = defaultProvider;
+                apiKey = cleanQuotes(arg);
+            } else {
+                provider = arg.toLowerCase(Locale.ROOT);
+                if (terminal != null && lineReader != null) {
+                    String existingKey = config.getApiKey(provider);
+                    String maskedHint = maskApiKey(existingKey);
+                    String prompt = "请输入 " + provider + " 的 API Key" + (existingKey != null && !existingKey.isBlank() ? " [已配置: " + maskedHint + ", 回车保留]: " : ": ");
+                    String input = readMaskedInput(terminal, lineReader, prompt);
+                    if (input != null && !input.isBlank()) {
+                        apiKey = input.trim();
+                    } else if (existingKey != null && !existingKey.isBlank()) {
+                        apiKey = existingKey;
+                    }
+                }
+            }
+        } else {
+            if (terminal != null && lineReader != null) {
+                LlmClient cur = llmClientRef != null ? llmClientRef.get() : null;
+                String defaultProvider = cur != null ? cur.getProviderName().toLowerCase(Locale.ROOT) : "deepseek";
+                String inputProvider = readInputLine(terminal, lineReader, "请输入要配置 API Key 的供应商 [默认: " + defaultProvider + "]: ");
+                provider = (inputProvider == null || inputProvider.isBlank()) ? defaultProvider : inputProvider.trim().toLowerCase(Locale.ROOT);
+                String existingKey = config.getApiKey(provider);
+                String maskedHint = maskApiKey(existingKey);
+                String prompt = "请输入 " + provider + " 的 API Key" + (existingKey != null && !existingKey.isBlank() ? " [已配置: " + maskedHint + ", 回车保留]: " : ": ");
+                String input = readMaskedInput(terminal, lineReader, prompt);
+                if (input != null && !input.isBlank()) {
+                    apiKey = input.trim();
+                } else if (existingKey != null && !existingKey.isBlank()) {
+                    apiKey = existingKey;
+                }
+            }
+        }
+
+        if (provider == null || apiKey == null || apiKey.isEmpty()) {
+            ui.println("[error] 参数不足或已取消。使用方法：/model key <provider> <apiKey> 或 /model key <apiKey>");
+            ui.println("   示例：/model key deepseek sk-1234567890abcdef");
+            ui.println("   示例：/model key sk-1234567890abcdef（为当前活跃供应商设置 Key）");
+            ui.println("   或者输入 /model 进入交互式配置向导。\n");
+            return;
+        }
+
+        ensureProviderConfig(config, provider).setApiKey(apiKey);
+        try {
+            config.save();
+        } catch (Exception e) {
+            ui.println("[error] 保存配置失败: " + e.getMessage() + "\n");
+        }
+
+        ui.println("✓ 已成功设置 " + provider + " 的 API Key: " + maskApiKey(apiKey));
+        ui.println("  配置已持久化至 ~/.javacli/config.json");
+
+        LlmClient current = llmClientRef != null ? llmClientRef.get() : null;
+        String currentProvider = current == null ? "" : current.getProviderName().toLowerCase(Locale.ROOT);
+        if (provider.equals(currentProvider)) {
+            reloadActiveClient(renderer, config, llmClientRef, reactAgent, mcpServerManager, skillRegistry, hitlHandler, provider);
+            ui.println("✓ 当前活跃客户端已热重载生效！\n");
+        } else {
+            ui.println("Run '/model " + provider + "' to switch to this provider.\n");
+        }
+    }
+
+    static void handleModelKeyCommand(PrintStream ui,
+                                      JavaCliConfig config,
+                                      AtomicReference<LlmClient> llmClientRef,
+                                      Agent reactAgent,
+                                      Renderer renderer,
+                                      McpServerManager mcpServerManager,
+                                      com.javacli.skill.SkillRegistry skillRegistry,
+                                      SwitchableHitlHandler hitlHandler,
+                                      String payload) {
+        handleModelKeyCommand(null, null, ui, config, llmClientRef, reactAgent, renderer, mcpServerManager, skillRegistry, hitlHandler, payload);
+    }
+
+    static void handleModelUrlCommand(Terminal terminal,
+                                      LineReader lineReader,
+                                      PrintStream ui,
+                                      JavaCliConfig config,
+                                      AtomicReference<LlmClient> llmClientRef,
+                                      Agent reactAgent,
+                                      Renderer renderer,
+                                      McpServerManager mcpServerManager,
+                                      com.javacli.skill.SkillRegistry skillRegistry,
+                                      SwitchableHitlHandler hitlHandler,
+                                      String payload) {
+        String[] tokens = payload.trim().split("\\s+", 3);
+        String provider = null;
+        String baseUrl = null;
+
+        if (tokens.length >= 3) {
+            provider = tokens[1].trim().toLowerCase(Locale.ROOT);
+            baseUrl = cleanQuotes(tokens[2].trim());
+        } else if (tokens.length == 2) {
+            String arg = tokens[1].trim();
+            if (arg.startsWith("http://") || arg.startsWith("https://")) {
+                LlmClient cur = llmClientRef != null ? llmClientRef.get() : null;
+                provider = cur != null ? cur.getProviderName().toLowerCase(Locale.ROOT) : (config != null ? config.getDefaultProvider() : "deepseek");
+                baseUrl = cleanQuotes(arg);
+            } else {
+                provider = arg.toLowerCase(Locale.ROOT);
+                if (terminal != null && lineReader != null) {
+                    String existing = config.getBaseUrl(provider);
+                    String prompt = "请输入 " + provider + " 的 Base URL" + (existing != null && !existing.isBlank() ? " [已配置: " + existing + ", 回车保留]: " : ": ");
+                    String input = readInputLine(terminal, lineReader, prompt);
+                    if (input != null && !input.isBlank()) {
+                        baseUrl = cleanQuotes(input.trim());
+                    } else if (existing != null && !existing.isBlank()) {
+                        baseUrl = existing;
+                    }
+                }
+            }
+        } else {
+            if (terminal != null && lineReader != null) {
+                LlmClient cur = llmClientRef != null ? llmClientRef.get() : null;
+                String defaultProvider = cur != null ? cur.getProviderName().toLowerCase(Locale.ROOT) : "deepseek";
+                String inputProvider = readInputLine(terminal, lineReader, "请输入要配置 Base URL 的供应商 [默认: " + defaultProvider + "]: ");
+                provider = (inputProvider == null || inputProvider.isBlank()) ? defaultProvider : inputProvider.trim().toLowerCase(Locale.ROOT);
+                String existing = config.getBaseUrl(provider);
+                String prompt = "请输入 " + provider + " 的 Base URL" + (existing != null && !existing.isBlank() ? " [已配置: " + existing + ", 回车保留]: " : ": ");
+                String input = readInputLine(terminal, lineReader, prompt);
+                if (input != null && !input.isBlank()) {
+                    baseUrl = cleanQuotes(input.trim());
+                } else if (existing != null && !existing.isBlank()) {
+                    baseUrl = existing;
+                }
+            }
+        }
+
+        if (provider == null || baseUrl == null || baseUrl.isEmpty()) {
+            ui.println("[error] 参数不足或已取消。使用方法：/model url <provider> <baseUrl>");
+            ui.println("   示例：/model url deepseek https://api.deepseek.com/v1\n");
+            return;
+        }
+
+        if (!baseUrl.startsWith("http://") && !baseUrl.startsWith("https://")) {
+            ui.println("[error] Base URL 必须以 http:// 或 https:// 开头: " + baseUrl + "\n");
+            return;
+        }
+
+        ensureProviderConfig(config, provider).setBaseUrl(baseUrl);
+        try {
+            config.save();
+        } catch (Exception e) {
+            ui.println("[error] 保存配置失败: " + e.getMessage() + "\n");
+        }
+
+        ui.println("✓ 已成功设置 " + provider + " 的 Base URL: " + baseUrl);
+        ui.println("  配置已持久化至 ~/.javacli/config.json");
+
+        LlmClient current = llmClientRef != null ? llmClientRef.get() : null;
+        String currentProvider = current == null ? "" : current.getProviderName().toLowerCase(Locale.ROOT);
+        if (provider.equals(currentProvider)) {
+            reloadActiveClient(renderer, config, llmClientRef, reactAgent, mcpServerManager, skillRegistry, hitlHandler, provider);
+            ui.println("✓ 当前活跃客户端已热重载生效！\n");
+        } else {
+            ui.println("Run '/model " + provider + "' to switch to this provider.\n");
+        }
+    }
+
+    static void handleModelUrlCommand(PrintStream ui,
+                                      JavaCliConfig config,
+                                      AtomicReference<LlmClient> llmClientRef,
+                                      Agent reactAgent,
+                                      Renderer renderer,
+                                      McpServerManager mcpServerManager,
+                                      com.javacli.skill.SkillRegistry skillRegistry,
+                                      SwitchableHitlHandler hitlHandler,
+                                      String payload) {
+        handleModelUrlCommand(null, null, ui, config, llmClientRef, reactAgent, renderer, mcpServerManager, skillRegistry, hitlHandler, payload);
+    }
+
+    static void handleModelConfigCommand(PrintStream ui,
+                                         JavaCliConfig config,
+                                         AtomicReference<LlmClient> llmClientRef,
+                                         Agent reactAgent,
+                                         Renderer renderer,
+                                         McpServerManager mcpServerManager,
+                                         com.javacli.skill.SkillRegistry skillRegistry,
+                                         SwitchableHitlHandler hitlHandler,
+                                         String payload) {
+        String[] tokens = payload.trim().split("\\s+");
+        if (tokens.length < 2) {
+            printModelShow(ui, config, llmClientRef, "show");
+            return;
+        }
+        String provider = tokens[1].toLowerCase(Locale.ROOT);
+        Map<String, String> flags = parseFlags(tokens, 2);
+
+        String key = flags.get("key");
+        String url = flags.get("url");
+        String model = flags.get("model");
+
+        if (key == null && url == null && model == null) {
+            ui.println("[error] 请至少提供一项配置参数 (--key, --url, --model)");
+            ui.println("   示例：/model config deepseek --key sk-xxx --url https://api.deepseek.com/v1\n");
+            return;
+        }
+
+        JavaCliConfig.ProviderConfig pc = ensureProviderConfig(config, provider);
+        if (key != null) {
+            pc.setApiKey(cleanQuotes(key));
+        }
+        if (url != null) {
+            String cleanUrl = cleanQuotes(url);
+            if (!cleanUrl.startsWith("http://") && !cleanUrl.startsWith("https://")) {
+                ui.println("[error] Base URL 必须以 http:// 或 https:// 开头: " + cleanUrl + "\n");
+                return;
+            }
+            pc.setBaseUrl(cleanUrl);
+        }
+        if (model != null) {
+            pc.setModel(cleanQuotes(model));
+        }
+
+        try {
+            config.save();
+        } catch (Exception e) {
+            ui.println("[error] 保存配置失败: " + e.getMessage() + "\n");
+        }
+
+        ui.println("✓ 已更新供应商 " + provider + " 配置:");
+        if (key != null) ui.println("   API Key: " + maskApiKey(pc.getApiKey()));
+        if (url != null) ui.println("   Base URL: " + pc.getBaseUrl());
+        if (model != null) ui.println("   Model: " + pc.getModel());
+        ui.println("  配置已持久化至 ~/.javacli/config.json");
+
+        LlmClient current = llmClientRef.get();
+        String currentProvider = current == null ? "" : current.getProviderName().toLowerCase(Locale.ROOT);
+        if (provider.equals(currentProvider) || model != null) {
+            reloadActiveClient(renderer, config, llmClientRef, reactAgent, mcpServerManager, skillRegistry, hitlHandler, provider);
+            ui.println("✓ 客户端已即时热重载生效！\n");
+        } else {
+            ui.println();
+        }
+    }
+
+    static void handleModelSwitchWithFlags(PrintStream ui,
+                                          JavaCliConfig config,
+                                          AtomicReference<LlmClient> llmClientRef,
+                                          Agent reactAgent,
+                                          Renderer renderer,
+                                          McpServerManager mcpServerManager,
+                                          com.javacli.skill.SkillRegistry skillRegistry,
+                                          SwitchableHitlHandler hitlHandler,
+                                          String payload) {
+        String[] tokens = payload.trim().split("\\s+");
+        List<String> positional = new ArrayList<>();
+        Map<String, String> flags = new HashMap<>();
+
+        for (int i = 0; i < tokens.length; i++) {
+            String t = tokens[i];
+            if (t.startsWith("--")) {
+                String flagName = t.substring(2);
+                String flagVal = "";
+                if (flagName.contains("=")) {
+                    int eq = flagName.indexOf('=');
+                    flagVal = flagName.substring(eq + 1);
+                    flagName = flagName.substring(0, eq);
+                } else if (i + 1 < tokens.length && !tokens[i + 1].startsWith("--")) {
+                    flagVal = tokens[++i];
+                }
+                flags.put(flagName.toLowerCase(Locale.ROOT), flagVal);
+            } else {
+                positional.add(t);
+            }
+        }
+
+        String targetName = positional.isEmpty() ? "" : positional.get(0);
+        ModelSelection target = resolveModelSelection(targetName);
+        String provider = target.provider();
+
+        JavaCliConfig.ProviderConfig pc = ensureProviderConfig(config, provider);
+        if (flags.containsKey("key")) {
+            pc.setApiKey(cleanQuotes(flags.get("key")));
+        }
+        if (flags.containsKey("url")) {
+            pc.setBaseUrl(cleanQuotes(flags.get("url")));
+        }
+        if (flags.containsKey("model")) {
+            pc.setModel(cleanQuotes(flags.get("model")));
+        }
+        if (positional.size() > 1) {
+            pc.setModel(cleanQuotes(positional.get(1)));
+        }
+
+        try {
+            config.save();
+        } catch (Exception ignored) {
+        }
+
+        switchModelDirect(renderer, config, llmClientRef, reactAgent, mcpServerManager, skillRegistry, hitlHandler,
+                positional.size() > 1 ? positional.get(1) : targetName);
+    }
+
+    private static void reloadActiveClient(Renderer renderer,
+                                          JavaCliConfig config,
+                                          AtomicReference<LlmClient> llmClientRef,
+                                          Agent reactAgent,
+                                          McpServerManager mcpServerManager,
+                                          com.javacli.skill.SkillRegistry skillRegistry,
+                                          SwitchableHitlHandler hitlHandler,
+                                          String provider) {
+        LlmClient newClient = LlmClientFactory.create(provider, config);
+        if (newClient != null) {
+            if (llmClientRef != null) {
+                llmClientRef.set(newClient);
+            }
+            if (reactAgent != null) {
+                reactAgent.setLlmClient(newClient);
+            }
+            if (renderer != null) {
+                renderer.updateStatus(statusInfo(newClient, hitlHandler, "idle", mcpServerManager, skillRegistry));
+            }
+        }
+    }
+
+    static String maskApiKey(String key) {
+        if (key == null || key.isBlank()) {
+            return "(未配置)";
+        }
+        String trimmed = key.trim();
+        if (trimmed.length() <= 8) {
+            return "********";
+        }
+        return trimmed.substring(0, 3) + "****" + trimmed.substring(trimmed.length() - 4);
+    }
+
+    private static String cleanQuotes(String val) {
+        if (val == null) return "";
+        String s = val.trim();
+        if ((s.startsWith("\"") && s.endsWith("\"")) || (s.startsWith("'") && s.endsWith("'"))) {
+            if (s.length() >= 2) {
+                return s.substring(1, s.length() - 1).trim();
+            }
+        }
+        return s;
+    }
+
+    private static Map<String, String> parseFlags(String[] tokens, int startIndex) {
+        Map<String, String> flags = new HashMap<>();
+        for (int i = startIndex; i < tokens.length; i++) {
+            String t = tokens[i];
+            if (t.startsWith("--")) {
+                String flagName = t.substring(2);
+                String flagVal = "";
+                if (flagName.contains("=")) {
+                    int eq = flagName.indexOf('=');
+                    flagVal = flagName.substring(eq + 1);
+                    flagName = flagName.substring(0, eq);
+                } else if (i + 1 < tokens.length && !tokens[i + 1].startsWith("--")) {
+                    flagVal = tokens[++i];
+                }
+                flags.put(flagName.toLowerCase(Locale.ROOT), flagVal);
+            }
+        }
+        return flags;
+    }
+
+    private static String truncateOrPad(String text, int width) {
+        if (text == null) text = "";
+        int len = AnsiStyle.displayWidth(text);
+        if (len > width) {
+            return text.substring(0, Math.min(text.length(), Math.max(1, width - 2))) + "..";
+        }
+        return text + " ".repeat(Math.max(0, width - len));
+    }
+
+    private static void switchOrConfigure(Terminal terminal,
+                                         LineReader lineReader,
+                                         Renderer renderer,
+                                         JavaCliConfig config,
+                                         AtomicReference<LlmClient> llmClientRef,
+                                         Agent reactAgent,
+                                         McpServerManager mcpServerManager,
+                                         com.javacli.skill.SkillRegistry skillRegistry,
+                                         SwitchableHitlHandler hitlHandler,
+                                         String payload,
+                                         boolean ready,
+                                         String provider) {
+        if (ready || (terminal != null && lineReader != null)) {
+            switchModelDirect(terminal, lineReader, renderer, config, llmClientRef, reactAgent,
+                    mcpServerManager, skillRegistry, hitlHandler, payload);
+        } else {
+            renderer.stream().println("[info] " + provider + " 尚未配置有效的 API Key，正在为您打开配置向导...\n");
+            runModelConfigWizard(terminal, lineReader, renderer, config, llmClientRef, reactAgent,
+                    mcpServerManager, skillRegistry, hitlHandler, provider);
+        }
+    }
+
+    static void runModelConfigWizard(Terminal terminal,
+                                     LineReader lineReader,
+                                     Renderer renderer,
+                                     JavaCliConfig config,
+                                     AtomicReference<LlmClient> llmClientRef,
+                                     Agent reactAgent,
+                                     McpServerManager mcpServerManager,
+                                     com.javacli.skill.SkillRegistry skillRegistry,
+                                     SwitchableHitlHandler hitlHandler,
+                                     String preselectedProvider) {
+        PrintStream ui = renderer.stream();
+        String provider = preselectedProvider;
+        if (provider == null || provider.isBlank()) {
+            List<String> providerOptions = List.of(
+                    "DeepSeek (官方端点 https://api.deepseek.com)",
+                    "智谱 GLM (官方端点 https://open.bigmodel.cn/api/paas/v4)",
+                    "月之暗面 Kimi (官方端点 https://api.moonshot.cn/v1)",
+                    "StepFun 阶跃星辰 (官方端点 https://api.stepfun.com/v1)",
+                    "OpenAI 官方 (端点 https://api.openai.com/v1)",
+                    "Ollama 本地 (默认 http://localhost:11434/v1, 免 Key)",
+                    "自定义 OpenAI 兼容服务 (SiliconFlow / vLLM / OneAPI / 自建代理)"
+            );
+            int pIdx = renderer.openPalette("选择要配置的供应商 / Preset", providerOptions);
+            if (pIdx < 0) {
+                ui.println("(已取消配置向导)\n");
+                return;
+            }
+            provider = switch (pIdx) {
+                case 0 -> "deepseek";
+                case 1 -> "glm";
+                case 2 -> "kimi";
+                case 3 -> "step";
+                case 4 -> "openai";
+                case 5 -> "ollama";
+                default -> "custom";
+            };
+        }
+
+        String defaultBaseUrl = switch (provider) {
+            case "deepseek" -> "https://api.deepseek.com/v1";
+            case "glm" -> "https://open.bigmodel.cn/api/paas/v4";
+            case "kimi" -> "https://api.moonshot.cn/v1";
+            case "step" -> "https://api.stepfun.com/v1";
+            case "openai" -> "https://api.openai.com/v1";
+            case "ollama" -> "http://localhost:11434/v1";
+            default -> "https://api.openai.com/v1";
+        };
+
+        String existingBaseUrl = config.getBaseUrl(provider);
+        String baseUrlToPrompt = (existingBaseUrl != null && !existingBaseUrl.isBlank()) ? existingBaseUrl : defaultBaseUrl;
+
+        ui.println("\nConnect provider: " + provider);
+        ui.println("────────────────────────────────────────────────────────────");
+        ui.println("Step 1: Endpoint Base URL");
+        ui.println("────────────────────────────────────────────────────────────");
+        String inputUrl = readInputLine(terminal, lineReader, "Base URL [default: " + baseUrlToPrompt + ", Enter to keep]: ");
+        String finalBaseUrl = (inputUrl == null || inputUrl.isBlank()) ? baseUrlToPrompt : inputUrl.trim();
+
+        ui.println("\nStep 2: API Key");
+        String existingKey = config.getApiKey(provider);
+        String maskedKeyHint = (existingKey != null && existingKey.length() > 6)
+                ? (existingKey.substring(0, 3) + "****" + existingKey.substring(existingKey.length() - 3))
+                : (existingKey != null && !existingKey.isBlank() ? "****" : "未配置");
+
+        String inputKey;
+        if ("ollama".equals(provider)) {
+            ui.println("   (本地 Ollama 服务默认无需 API Key，直接回车即可)");
+            inputKey = readMaskedInput(terminal, lineReader, "API Key [optional, Enter to skip]: ");
+            if (inputKey == null || inputKey.isBlank()) {
+                inputKey = "ollama";
+            }
+        } else {
+            String promptKey = (existingKey != null && !existingKey.isBlank())
+                    ? "API Key [configured: " + maskedKeyHint + ", Enter to keep]: "
+                    : "Enter API Key: ";
+            inputKey = readMaskedInput(terminal, lineReader, promptKey);
+            if (inputKey == null || inputKey.isBlank()) {
+                inputKey = existingKey;
+            }
+        }
+
+        if (inputKey == null || inputKey.isBlank()) {
+            ui.println("[warn] No valid API key provided, configuration aborted.\n");
+            return;
+        }
+
+        ui.println("\nConnecting to " + finalBaseUrl + " to fetch available models...");
+        ModelDiscoveryService discoveryService = new ModelDiscoveryService();
+        List<String> models = List.of();
+        try {
+            models = discoveryService.fetchModels(finalBaseUrl, inputKey);
+        } catch (Exception e) {
+            ui.println("[info] Failed to auto-fetch models: " + e.getMessage());
+        }
+
+        String selectedModel = null;
+        if (models != null && !models.isEmpty()) {
+            ui.println("Found " + models.size() + " models from endpoint. Select one:");
+            List<String> paletteItems = new ArrayList<>(models);
+            paletteItems.add("Custom model name...");
+            int mIdx = renderer.openPalette("选择远程可用模型", paletteItems);
+            if (mIdx >= 0 && mIdx < models.size()) {
+                selectedModel = models.get(mIdx);
+            }
+        }
+
+        if (selectedModel == null) {
+            String defaultModel = switch (provider) {
+                case "deepseek" -> "deepseek-chat";
+                case "glm" -> "glm-5.1";
+                case "kimi" -> "kimi-k2.6";
+                case "step" -> "step-3.5-flash";
+                case "openai" -> "gpt-4o";
+                case "ollama" -> "llama3";
+                default -> "gpt-4o";
+            };
+            String inputModel = readInputLine(terminal, lineReader, "Model name [default: " + defaultModel + "]: ");
+            selectedModel = (inputModel == null || inputModel.isBlank()) ? defaultModel : inputModel.trim();
+        }
+
+        ensureProviderConfig(config, provider).setBaseUrl(finalBaseUrl);
+        ensureProviderConfig(config, provider).setApiKey(inputKey);
+        ensureProviderConfig(config, provider).setModel(selectedModel);
+        config.setDefaultProvider(provider);
+        config.save();
+
+        LlmClient newClient = LlmClientFactory.create(provider, config);
+        if (newClient != null) {
+            llmClientRef.set(newClient);
+            reactAgent.setLlmClient(newClient);
+            renderer.updateStatus(statusInfo(newClient, hitlHandler, "idle", mcpServerManager, skillRegistry));
+            ui.println("\n✓ Connected provider " + provider + " (" + selectedModel + ")");
+            ui.println("  Base URL: " + finalBaseUrl);
+            ui.println("  Saved to ~/.javacli/config.json\n");
+        } else {
+            ui.println("[error] Failed to initialize client, please check credentials and endpoint.\n");
+        }
+    }
+
+    static void refreshModelsForCurrentProvider(Terminal terminal,
+                                                LineReader lineReader,
+                                                Renderer renderer,
+                                                JavaCliConfig config,
+                                                AtomicReference<LlmClient> llmClientRef,
+                                                Agent reactAgent,
+                                                McpServerManager mcpServerManager,
+                                                com.javacli.skill.SkillRegistry skillRegistry,
+                                                SwitchableHitlHandler hitlHandler) {
+        PrintStream ui = renderer.stream();
+        LlmClient currentClient = llmClientRef.get();
+        if (currentClient == null) {
+            ui.println("⚠️ 当前没有活跃的模型客户端。\n");
+            return;
+        }
+        String provider = currentClient.getProviderName();
+        String baseUrl = config.getBaseUrl(provider);
+        String apiKey = config.getApiKey(provider);
+
+        if (baseUrl == null || baseUrl.isBlank()) {
+            baseUrl = switch (provider.toLowerCase(Locale.ROOT)) {
+                case "deepseek" -> "https://api.deepseek.com/v1";
+                case "glm" -> "https://open.bigmodel.cn/api/paas/v4";
+                case "kimi" -> "https://api.moonshot.cn/v1";
+                case "step" -> "https://api.stepfun.com/v1";
+                case "openai" -> "https://api.openai.com/v1";
+                case "ollama" -> "http://localhost:11434/v1";
+                default -> "https://api.openai.com/v1";
+            };
+        }
+
+        ui.println("\n🔄 正在连接 " + baseUrl + " 拉取 " + provider + " 的最新模型列表...");
+        ModelDiscoveryService service = new ModelDiscoveryService();
+        List<String> models;
+        try {
+            models = service.fetchModels(baseUrl, apiKey);
+        } catch (Exception e) {
+            ui.println("❌ 拉取失败: " + e.getMessage() + "\n");
+            return;
+        }
+
+        if (models == null || models.isEmpty()) {
+            ui.println("⚠️ 未从端点获取到模型列表。\n");
+            return;
+        }
+
+        int mIdx = renderer.openPalette("选择远程可用模型 (共 " + models.size() + " 个)", models);
+        if (mIdx < 0) {
+            ui.println("(已取消模型切换)\n");
+            return;
+        }
+
+        String chosenModel = models.get(mIdx);
+        ensureProviderConfig(config, provider).setModel(chosenModel);
+        config.save();
+
+        LlmClient newClient = LlmClientFactory.create(provider, config);
+        if (newClient != null) {
+            llmClientRef.set(newClient);
+            reactAgent.setLlmClient(newClient);
+            renderer.updateStatus(statusInfo(newClient, hitlHandler, "idle", mcpServerManager, skillRegistry));
+            ui.println("✓ 已成功切换至模型: " + chosenModel + " (" + provider + ")\n");
+        }
+    }
+
+    static String readInputLine(Terminal terminal, LineReader lineReader, String prompt) {
+        if (lineReader != null) {
+            try {
+                return lineReader.readLine(prompt);
+            } catch (Exception e) {
+                return null;
+            }
+        }
+        if (terminal != null) {
+            try {
+                terminal.writer().print(prompt);
+                terminal.writer().flush();
+                java.io.BufferedReader reader = new java.io.BufferedReader(new java.io.InputStreamReader(terminal.input()));
+                return reader.readLine();
+            } catch (Exception e) {
+                return null;
+            }
+        }
+        return null;
+    }
+
+    static String readMaskedInput(Terminal terminal, LineReader lineReader, String prompt) {
+        if (lineReader != null) {
+            try {
+                return lineReader.readLine(prompt, null, '*', null);
+            } catch (Exception e) {
+                return null;
+            }
+        }
+        return readInputLine(terminal, lineReader, prompt);
+    }
+
+    static boolean hasApiKey(JavaCliConfig config, String provider) {
+        if (config == null) {
+            return false;
+        }
+        String key = config.getApiKey(provider);
+        return key != null && !key.isBlank();
+    }
+
+    static boolean hasConfigured(JavaCliConfig config, String provider) {
+        if (config == null) {
+            return false;
+        }
+        if ("ollama".equalsIgnoreCase(provider)) {
+            return true;
+        }
+        return hasApiKey(config, provider);
+    }
+
+    static boolean isStandardWellKnownProvider(String provider) {
+        if (provider == null) return false;
+        String p = provider.trim().toLowerCase(Locale.ROOT);
+        return switch (p) {
+            case "glm", "deepseek", "step", "kimi", "openai", "ollama" -> true;
+            default -> false;
+        };
+    }
+
+    static void switchModelDirect(Renderer renderer,
+                                  JavaCliConfig config,
+                                  AtomicReference<LlmClient> llmClientRef,
+                                  Agent reactAgent,
+                                  McpServerManager mcpServerManager,
+                                  com.javacli.skill.SkillRegistry skillRegistry,
+                                  SwitchableHitlHandler hitlHandler,
+                                  String payload) {
+        switchModelDirect(null, null, renderer, config, llmClientRef, reactAgent,
+                mcpServerManager, skillRegistry, hitlHandler, payload);
+    }
+
+    static void switchModelDirect(Terminal terminal,
+                                  LineReader lineReader,
+                                  Renderer renderer,
+                                  JavaCliConfig config,
+                                  AtomicReference<LlmClient> llmClientRef,
+                                  Agent reactAgent,
+                                  McpServerManager mcpServerManager,
+                                  com.javacli.skill.SkillRegistry skillRegistry,
+                                  SwitchableHitlHandler hitlHandler,
+                                  String payload) {
+        PrintStream ui = renderer.stream();
+        ModelSelection target = resolveModelSelection(payload);
+        if (target.explicitModel()) {
+            ensureProviderConfig(config, target.provider()).setModel(target.model());
+        }
+        LlmClient newClient = LlmClientFactory.create(target.provider(), config);
+        if (newClient == null && terminal != null && lineReader != null) {
+            // Interactive in-place input: ask for missing API Key directly instead of erroring out
+            ui.println("API key not configured for provider \u001b[1m" + target.provider() + "\u001b[0m.");
+            String prompt = "Enter API key for " + target.provider() + ": ";
+            String inputKey = readMaskedInput(terminal, lineReader, prompt);
+            if (inputKey != null && !inputKey.isBlank()) {
+                config.setApiKey(target.provider(), inputKey.trim());
+                if (config.getBaseUrl(target.provider()) == null && !isStandardWellKnownProvider(target.provider())) {
+                    String urlPrompt = "Enter Base URL for " + target.provider() + " [default: https://api.openai.com/v1]: ";
+                    String inputUrl = readInputLine(terminal, lineReader, urlPrompt);
+                    String finalUrl = (inputUrl == null || inputUrl.isBlank()) ? "https://api.openai.com/v1" : inputUrl.trim();
+                    config.setBaseUrl(target.provider(), finalUrl);
+                }
+                config.save();
+                newClient = LlmClientFactory.create(target.provider(), config);
+            } else {
+                ui.println("[info] Cancelled.\n");
+                return;
+            }
+        }
+
+        if (newClient == null) {
+            ui.println("[error] 切换失败：未检测到 " + target.provider() + " 可用的 API Key\n");
+            printProviderMissingKeyHelp(ui, target.provider());
+            return;
+        }
+        if (llmClientRef != null) {
+            llmClientRef.set(newClient);
+        }
+        config.setDefaultProvider(target.provider());
+        config.save();
+        if (reactAgent != null) {
+            reactAgent.setLlmClient(newClient);
+        }
+        ui.println("✓ 已成功切换底层模型: " + newClient.getModelName() + " (" + newClient.getProviderName() + ")");
+        if (reactAgent != null && reactAgent.getMemoryManager() != null && reactAgent.getMemoryManager().getContextProfile() != null) {
+            ui.println("   上下文策略: " + reactAgent.getMemoryManager().getContextProfile().summary());
+        }
+        ui.println("   对话历史已保留，输入任务即可继续交互\n");
+        if (renderer != null) {
+            renderer.updateStatus(statusInfo(newClient, hitlHandler, "idle", mcpServerManager, skillRegistry));
+        }
+    }
+
+    private static void printProviderMissingKeyHelp(PrintStream ui, String provider) {
+        String keyName = switch (provider.toLowerCase(Locale.ROOT)) {
+            case "glm" -> "GLM_API_KEY";
+            case "deepseek" -> "DEEPSEEK_API_KEY";
+            case "step" -> "STEP_API_KEY";
+            case "kimi" -> "KIMI_API_KEY";
+            default -> provider.toUpperCase(Locale.ROOT) + "_API_KEY";
+        };
+        ui.println("Configuration hint: add to .env or ~/.javacli/config.json:");
+        ui.println("   " + keyName + "=your_api_key_here");
+        if ("step".equalsIgnoreCase(provider) || "kimi".equalsIgnoreCase(provider)) {
+            ui.println("   " + provider.toUpperCase(Locale.ROOT) + "_BASE_URL=https://... (optional, OpenAI-compatible endpoint)");
+        }
+        ui.println("Or run: /model key " + provider + " <apiKey>\n");
+    }
+
+    private static void printCustomOpenAiGuide(PrintStream ui) {
+        ui.println();
+        ui.println(AnsiStyle.heading("🌐 自定义 OpenAI 兼容端点配置指引"));
+        ui.println("JavaCLI 底层通信采用标准 OpenAI 格式（POST /v1/chat/completions），原生兼容：");
+        ui.println("  • 本地模型：Ollama、vLLM、LocalAI、FastChat、LM Studio");
+        ui.println("  • 云端服务：SiliconFlow (硅基流动)、DeepSeek 官方、OneAPI、NewAPI、OpenRouter 等");
+        ui.println();
+        ui.println("👉 推荐配置方式（在项目根目录 .env 文件中设置）：");
+        ui.println("   方式一：通过 Step 驱动转发（推荐）");
+        ui.println("     STEP_BASE_URL=http://localhost:11434/v1   # 你的 OpenAI 兼容基础地址");
+        ui.println("     STEP_API_KEY=ollama                       # 服务所需 API Key（无则填任意非空串）");
+        ui.println("     STEP_MODEL=qwen2.5-coder:32b              # 指定模型标识");
+        ui.println("     配置完成后在终端输入: /model step 即可切换！");
+        ui.println();
+        ui.println("   方式二：通过 Kimi 驱动转发");
+        ui.println("     KIMI_BASE_URL=https://api.siliconflow.cn/v1");
+        ui.println("     KIMI_API_KEY=sk-your-siliconflow-key");
+        ui.println("     KIMI_MODEL=deepseek-ai/DeepSeek-V3");
+        ui.println("     配置完成后在终端输入: /model kimi 即可切换！");
+        ui.println();
+        ui.println("💡 提示：修改 .env 后，无需重启程序，直接运行 /model 即可完成切换。\n");
+    }
+
+    private static void printConfigGuide(PrintStream ui) {
+        ui.println();
+        ui.println(AnsiStyle.heading("📝 JavaCLI 配置文件与密钥管理说明"));
+        ui.println("配置加载优先级：系统环境变量 > 当前项目根目录 .env > 用户全局 ~/.javacli/config.json");
+        ui.println();
+        ui.println("📂 配置文件位置：");
+        ui.println("   • 项目级配置：./.env （推荐，可从 .env.example 复制）");
+        ui.println("   • 全局配置文件：~/.javacli/config.json （跨项目共用）");
+        ui.println();
+        ui.println("🔑 常见模型配置项一览：");
+        ui.println("   智谱 GLM:     GLM_API_KEY=... / GLM_MODEL=glm-5.1");
+        ui.println("   DeepSeek:     DEEPSEEK_API_KEY=... / DEEPSEEK_MODEL=deepseek-v4-flash");
+        ui.println("   StepFun 阶跃: STEP_API_KEY=... / STEP_BASE_URL=https://api.stepfun.com/v1");
+        ui.println("   Kimi 月之暗面: KIMI_API_KEY=... / KIMI_BASE_URL=https://api.moonshot.ai/v1");
+        ui.println("   嵌入检索向量: EMBEDDING_PROVIDER=ollama / EMBEDDING_BASE_URL=http://localhost:11434");
+        ui.println();
     }
 
     static void bindCtrlOToFoldableBlocks(LineReader lineReader, InlineRenderer inline) {
@@ -1823,10 +3078,11 @@ public class Main {
                                          McpServerManager mcpServerManager,
                                          SkillRegistry skillRegistry) {
         String normalizedPhase = phase == null || phase.isBlank() ? "idle" : phase;
+        boolean hitlEnabled = hitlHandler != null && hitlHandler.isEnabled();
         StatusInfo base = "idle".equals(normalizedPhase)
-                ? StatusInfo.idle(llmClient.getModelName(), llmClient.maxContextWindow(), hitlHandler.isEnabled())
+                ? StatusInfo.idle(llmClient.getModelName(), llmClient.maxContextWindow(), hitlEnabled)
                 : StatusInfo.active(llmClient.getModelName(), llmClient.maxContextWindow(),
-                hitlHandler.isEnabled(), normalizedPhase);
+                hitlEnabled, normalizedPhase);
         return base.withEnvironment(mcpStatusSummary(mcpServerManager), skillStatusSummary(skillRegistry));
     }
 
@@ -2126,8 +3382,31 @@ public class Main {
         return null;
     }
 
+    static boolean isKnownProviderName(JavaCliConfig config, String name) {
+        if (name == null || name.isBlank()) {
+            return false;
+        }
+        String n = name.trim().toLowerCase(Locale.ROOT);
+        if (List.of("glm", "deepseek", "step", "kimi", "openai", "ollama", "sensenova", "custom").contains(n)) {
+            return true;
+        }
+        return config != null && config.getProviders() != null && config.getProviders().containsKey(n);
+    }
+
     static ModelSelection resolveModelSelection(String raw) {
         String value = raw == null ? "" : raw.trim();
+        if (value.contains("/")) {
+            String[] parts = value.split("/", 2);
+            String provider = parts[0].trim().toLowerCase(Locale.ROOT);
+            String model = parts[1].trim();
+            return new ModelSelection(provider, model.isEmpty() ? null : model, !model.isEmpty());
+        }
+        if (value.contains(" ")) {
+            String[] parts = value.split("\\s+", 2);
+            String provider = parts[0].trim().toLowerCase(Locale.ROOT);
+            String model = parts[1].trim();
+            return new ModelSelection(provider, model.isEmpty() ? null : model, !model.isEmpty());
+        }
         String normalized = value.toLowerCase(Locale.ROOT);
         return switch (normalized) {
             case "glm" -> new ModelSelection("glm", "glm-5.1", true);
@@ -2196,11 +3475,11 @@ public class Main {
         String capabilities = "ReAct · Plan · MCP · Browser · Image · Tools · Memory · RAG";
         String state = mcp + " · " + skills + " · ReAct";
         List<String> lines = new ArrayList<>(List.of(
-                "   " + AnsiStyle.section("██████████") + "    " + AnsiStyle.emphasis("JavaCLI") + " " + AnsiStyle.section("π") + "  " + AnsiStyle.subtle("v" + VERSION),
-                "   " + AnsiStyle.section("  ██  ██") + "    " + AnsiStyle.subtle(ready),
-                "   " + AnsiStyle.section("  ██  ██") + "    " + AnsiStyle.subtle(state),
-                "   " + AnsiStyle.section("  ██  ██") + "    " + AnsiStyle.subtle(capabilities),
-                "   " + AnsiStyle.section("  ██  ██"),
+                "   " + AnsiStyle.section("██      ██") + "    " + AnsiStyle.emphasis("JavaCLI") + " " + AnsiStyle.section("X") + "  " + AnsiStyle.subtle("v" + VERSION),
+                "   " + AnsiStyle.section("  ██  ██  ") + "    " + AnsiStyle.subtle(ready),
+                "   " + AnsiStyle.section("   ████   ") + "    " + AnsiStyle.subtle(state),
+                "   " + AnsiStyle.section("  ██  ██  ") + "    " + AnsiStyle.subtle(capabilities),
+                "   " + AnsiStyle.section("██      ██"),
                 "",
                 "Tips for getting started:",
                 "1. Type " + AnsiStyle.emphasis("/") + " for commands and Tab completion",

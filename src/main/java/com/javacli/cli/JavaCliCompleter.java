@@ -1,5 +1,6 @@
 package com.javacli.cli;
 
+import com.javacli.config.JavaCliConfig;
 import com.javacli.mcp.mention.AtMentionCompleter;
 import com.javacli.mcp.resources.McpResourceDescriptor;
 import com.javacli.skill.Skill;
@@ -10,6 +11,7 @@ import org.jline.reader.ParsedLine;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.function.Supplier;
 
 final class JavaCliCompleter implements Completer {
@@ -86,14 +88,57 @@ final class JavaCliCompleter implements Completer {
         if (!input.equalsIgnoreCase("/model") && !input.regionMatches(true, 0, "/model ", 0, 7)) {
             return false;
         }
-        String value = input.length() <= 7 ? "" : input.substring(7);
-        addMatching(candidates, "模型", value,
-                option("glm-5.1", "GLM-5.1 长上下文"),
-                option("glm-5v-turbo", "GLM-5V 多模态"),
-                option("deepseek", "DeepSeek，读取配置模型"),
-                option("step", "StepFun，读取配置模型"),
-                option("kimi", "Kimi/Moonshot，读取配置模型"));
+        String payload = input.length() <= 7 ? "" : input.substring(7);
+        String[] parts = payload.trim().isEmpty() ? new String[0] : payload.trim().split("\\s+");
+
+        // 如果用户正在键入 key/url/config/show 的子参数，提供 provider 补全
+        if (parts.length >= 1) {
+            String sub = parts[0].toLowerCase(Locale.ROOT);
+            if (List.of("key", "url", "config", "show", "set-key", "set-url", "info").contains(sub)) {
+                if (parts.length == 1 && payload.endsWith(" ")) {
+                    addProviderCandidates(candidates, "");
+                    return true;
+                } else if (parts.length == 2 && !payload.endsWith(" ")) {
+                    addProviderCandidates(candidates, parts[1]);
+                    return true;
+                }
+            }
+        }
+
+        JavaCliConfig config = JavaCliConfig.load();
+        boolean glmReady = config.getApiKey("glm") != null && !config.getApiKey("glm").isBlank();
+        boolean deepseekReady = config.getApiKey("deepseek") != null && !config.getApiKey("deepseek").isBlank();
+        boolean stepReady = config.getApiKey("step") != null && !config.getApiKey("step").isBlank();
+        boolean kimiReady = config.getApiKey("kimi") != null && !config.getApiKey("kimi").isBlank();
+        boolean openaiReady = config.getApiKey("openai") != null && !config.getApiKey("openai").isBlank();
+
+        addMatching(candidates, "模型指令", payload,
+                option("key ", "设置指定供应商的 API Key", "/model key <provider> <key>"),
+                option("url ", "设置指定供应商的端点 Base URL", "/model url <provider> <url>"),
+                option("config ", "配置供应商参数 (URL / Key / Model)", "/model config <provider> ..."),
+                option("show", "查看当前各供应商配置概况与状态", "/model show"));
+
+        addMatching(candidates, "模型", payload,
+                option("glm-5.1", glmReady ? "GLM-5.1 长上下文 (✅ 已就绪)" : "GLM-5.1 (需 GLM_API_KEY)"),
+                option("glm-5v-turbo", glmReady ? "GLM-5V 多模态识图 (✅ 已就绪)" : "GLM-5V (需 GLM_API_KEY)"),
+                option("deepseek", deepseekReady ? "DeepSeek (✅ 已就绪)" : "DeepSeek (需 DEEPSEEK_API_KEY)"),
+                option("step", stepReady ? "StepFun / 自定义OpenAI (✅ 已就绪)" : "StepFun (需 STEP_API_KEY)"),
+                option("kimi", kimiReady ? "Kimi / 自定义OpenAI (✅ 已就绪)" : "Kimi (需 KIMI_API_KEY)"),
+                option("openai", openaiReady ? "OpenAI 官方 (✅ 已就绪)" : "OpenAI (需 OPENAI_API_KEY)"),
+                option("ollama", "Ollama 本地大模型 (✅ 默认 11434)"),
+                option("custom", "自定义 OpenAI 兼容端点"));
         return true;
+    }
+
+    private void addProviderCandidates(List<Candidate> candidates, String prefix) {
+        addMatching(candidates, "供应商", prefix,
+                option("deepseek", "DeepSeek 官方或兼容端点"),
+                option("glm", "智谱 GLM 开放平台"),
+                option("kimi", "Moonshot Kimi 端点"),
+                option("step", "StepFun 阶跃星辰端点"),
+                option("openai", "OpenAI 官方端点"),
+                option("ollama", "本地 Ollama 端点 (默认 11434)"),
+                option("custom", "自定义 OpenAI 兼容端点 (OneAPI/vLLM/etc)"));
     }
 
     private boolean completeMcp(String input, List<Candidate> candidates) {

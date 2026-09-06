@@ -80,6 +80,27 @@ public class JavaCliConfig {
         return loadBaseUrlFromEnv(provider);
     }
 
+    public void setApiKey(String provider, String apiKey) {
+        if (providers == null) {
+            providers = new LinkedHashMap<>();
+        }
+        providers.computeIfAbsent(provider, ignored -> new ProviderConfig()).setApiKey(apiKey);
+    }
+
+    public void setModel(String provider, String model) {
+        if (providers == null) {
+            providers = new LinkedHashMap<>();
+        }
+        providers.computeIfAbsent(provider, ignored -> new ProviderConfig()).setModel(model);
+    }
+
+    public void setBaseUrl(String provider, String baseUrl) {
+        if (providers == null) {
+            providers = new LinkedHashMap<>();
+        }
+        providers.computeIfAbsent(provider, ignored -> new ProviderConfig()).setBaseUrl(baseUrl);
+    }
+
     public static JavaCliConfig load() {
         if (Files.exists(CONFIG_FILE)) {
             try {
