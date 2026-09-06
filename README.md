@@ -67,35 +67,68 @@ mvn clean package
 打包成功后，可执行 JAR 包位于 `target/javacli-1.0-SNAPSHOT.jar`。
 
 ### 4. 运行 JavaCLI
+
+推荐使用根目录下的一键启动脚本（自动配置 UTF-8 编码与 JDK 21+ JLine 原生终端支持）：
+
 ```bash
-java -jar target/javacli-1.0-SNAPSHOT.jar
+# macOS / Linux
+./run.sh
+
+# Windows (CMD / PowerShell)
+run.bat
+```
+
+也可以直接使用 `java` 运行：
+```bash
+java --enable-native-access=ALL-UNNAMED -jar target/javacli-1.0-SNAPSHOT.jar
+```
+
+#### 命令行启动参数
+```bash
+javacli -h, --help                 # 显示命令行帮助与用法
+javacli -v, --version              # 显示当前产品版本信息
+javacli "解释 pom.xml 结构"         # 直接以初始任务启动并进入交互式会话
+javacli /plan "重构工具执行器"      # 直接以 Plan-and-Execute 模式规划执行
+javacli /team "编写并验证登录模块"   # 直接以 Multi-Agent 协作模式执行
 ```
 
 ---
 
 ## ⌨️ 常用 CLI 命令
 
-JavaCLI 提供了一套丰富的终端斜杠命令，让您更轻松地控制智能体行为：
+JavaCLI 提供了一套完整的终端斜杠命令与快捷键系统，支持 `Tab` 智能补全与实时语法高亮：
 
-| 命令 | 描述 |
-| :--- | :--- |
-| `/plan <任务>` | 进入 **Plan-and-Execute 模式** 规划并执行特定任务 |
-| `/team <任务>` | 进入 **Multi-Agent 协作模式** 运行任务 |
-| `/model <名称>` | 运行时切换当前大模型（如 `glm-5.1`、`deepseek`、`step`） |
-| `/hitl [on\|off]` | 查看、开启或关闭人工审批确认流 |
-| `/browser connect`| 连接本地已开启调试端口的 Chrome 浏览器，复用登录态 |
-| `/browser status` | 查看当前浏览器连接状态与 Tab 列表 |
-| `/index [路径]` | 构建指定目录的代码库语义索引（RAG 前置） |
-| `/search <查询>` | 在代码库中进行自然语言语义代码搜索 |
-| `/graph <类名>` | 检索特定类的关系拓扑图谱（继承、实现、调用关系） |
-| `/save <事实>` | 保存项目级长期记忆（例如 `/save --global 默认用中文回答`） |
-| `/memory` | 查看长期记忆状态，支持 `list`, `search`, `delete`, `clear` 子命令 |
-| `/policy` | 查看当前系统安全防御机制与审计状态 |
-| `/audit [N]` | 查看最近 N 条危险工具审计记录 |
-| `/snapshot` | 查看或管理当前项目的本地 git 快照与回滚点 |
-| `/restore <N>` | 将工作区恢复到最近第 N 个 pre-turn 快照状态 |
-| `/clear` | 清空当前对话的短期历史记录，不影响长期记忆 |
-| `/exit` | 退出 JavaCLI 客户端 |
+| 分组 | 命令 | 描述 |
+| :--- | :--- | :--- |
+| **🎯 执行模式** | `/plan [任务]` | 进入 **Plan-and-Execute 模式** 进行有向无环图 (DAG) 多步任务规划与执行 |
+| | `/team [任务]` | 进入 **Multi-Agent 协作模式**（编排器-执行者-审查者自动分工与复审） |
+| | `/hitl [on\|off]` | 查看、开启或关闭危险操作单字符人工审批确认流 (`[y/n/a/s/m]`) |
+| **🧠 上下文与记忆** | `/context` (或 `/ctx`) | 查看当前上下文 Token、缓存占比与预算状态 |
+| | `/memory` (或 `/mem`) | 查看跨会话记忆状态，支持 `list`、`search <词>`、`delete <id>`、`clear` |
+| | `/save [--global] <事实>` | 手动持久化项目级（默认）或跨项目全局的长期事实记忆 |
+| | `/clear` | 清空当前对话的短期历史记录（长期记忆保持不变） |
+| | `/history clear` | 清空本地终端历史输入记录 |
+| **🔍 代码检索与探索** | `/index [路径]` | 构建指定目录代码库的 AST 关系拓扑与语义向量索引（RAG 前置） |
+| | `/search <查询>` | 基于自然语言语义在代码库中进行混合代码检索（AST + 向量） |
+| | `/graph <类名>` | 检索特定类的依赖拓扑图谱（包含 `extends`、`implements`、`calls` 等关系） |
+| **🛡️ 安全与快照** | `/snapshot [status\|clean]` | 查看或清理当前项目的 Side-Git 本地快照点 |
+| | `/restore <N>` | 将工作区恢复到最近第 N 个 pre-turn 快照状态 |
+| | `/policy` | 查看当前路径沙箱（PathGuard）与系统安全防护策略 |
+| | `/audit [N]` | 查看最近 N 条危险工具执行审计记录（取自每日结构化 JSONL 审计链） |
+| **🔌 生态与模型配置** | `/model` (或 `/models`) | OpenCode 风格可搜索模型弹窗与管理（支持 Type-to-Search 拼写过滤、`[active]` 状态徽章、`provider/model` 规范、`/model show` 概况、`/model key [provider] <key>` 设置密钥、`/model url [provider] <url>` 设置端点、`/model config` 多参数配置与快捷切换） |
+| | `/mcp` | 查看 MCP 服务端状态与工具清单（支持 `restart` / `logs` / `disable` / `enable` / `resources` / `prompts`） |
+| | `/skill` | 管理智能体技能（支持 `list` / `show <name>` / `on <name>` / `off <name>` / `reload`） |
+| | `/browser` | 管理 Chrome DevTools 浏览器会话（支持 `status` / `connect` / `tabs` / `disconnect`） |
+| | `/task` | 管理持久化异步后台任务（支持 `list` / `add <任务>` / `cancel <id>` / `log <id>`） |
+| | `/config` | 打开配置交互面板（只读视图与配置切换快捷指引） |
+| **🚪 快捷命令** | `/help` (或 `/?`) | 查看可用命令分组指引与详细说明 |
+| | `/exit` (或 `/quit`) | 退出程序（终端内亦支持连按两次 `Ctrl+C` 退出） |
+
+> 💡 **交互小贴士**：
+> - 键入以 `/` 起始的命令时，底部原地呈现 OpenCode / Claude Code 风格的建议卡片（高度恒定无滚屏跳跃），支持 `↑` / `↓` 切换选中项、`Tab` 自动补全、`Enter` 执行选中命令；
+> - 任务输出过程中，可按 `Ctrl+O` 展开或收起上一个折叠工具调用块；
+> - 正在运行任务时，按 `Esc` 即可取消当前流式执行；
+> - 输入 `@` 可联想补全本地文件路径（自动读取内容）或 MCP Resource 资源；输入 `@image:` 可引入图片路径。
 
 ---
 

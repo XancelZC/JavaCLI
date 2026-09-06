@@ -77,7 +77,7 @@ src/main/java/com/javacli/
 
 启动与 inline 渲染当前约定：
 
-- 开屏 Banner 使用无右边框的简洁布局，避免 CJK/ANSI 字宽导致右侧竖线错位；Phase 22 后默认是 π 主题彩色 logo + Qoder 风格首屏，只展示模型、MCP、Skill、ReAct 状态和三条 getting-started tips，不再把 MCP server 明细刷成启动日志。
+- 开屏 Banner 使用无右边框的简洁布局，避免 CJK/ANSI 字宽导致右侧竖线错位；Phase 22 后默认是 X 主题彩色 logo + Qoder 风格首屏，只展示模型、MCP、Skill、ReAct 状态和三条 getting-started tips，不再把 MCP server 明细刷成启动日志。
 - inline 模式使用 JLine 4 的 LineReader 编辑能力，默认提示符是 `* `，右提示显示 `message / @path / @image`。
 - 默认 CLI 启动路径应先 `Renderer.start()` 并初始化底部 dock；inline 首屏不要在 `readLine` 前裸写 stdout，而是通过 `InlineRenderer.installStartupScreen(...)` 挂到 `LineReader.CALLBACK_INIT`，首次进入输入时用 `printAbove` 一次性显示完整 Banner + tips，避免 logo 被 LineReader 首次重绘滚出可视区域。
 - `BottomStatusBar` 现在是 JLine `Status` 托管的底部 dock：由 JLine 维护滚动区域和状态行位置，不再手写 `\n` / `moveUp` / `CLEAR_TO_EOS` 清屏。输入期会把 LineReader 光标定位到 dock 上方一行，让 `*` 输入行和 Status 同处底部区域；dock 保留两类信息：上层模式 + MCP/Skill 摘要，下层 Auto Model / model / phase / ctx 百分比与 token / cost / elapsed / cwd。
@@ -88,7 +88,10 @@ src/main/java/com/javacli/
 - ReAct 正常结束后不再把 `📊 Token: ...` 打进正文区；token/cost/elapsed 会保留在底部强状态行，phase 回到 `idle`。
 - 默认 CLI 启动路径应尽早建立 `Terminal -> LineReader -> Renderer`，启动 Banner、模型加载、MCP 启动、Skill summary、ReAct 提示和退出提示都应走 `Renderer.stream()`；除 fatal bootstrap / runtime API / legacy TUI 降级外，不要在交互主路径新增裸 `System.out.println`。
 - 启动期 MCP 不得阻塞首屏：CLI 默认最多等待 8 秒（`JAVACLI_MCP_STARTUP_WAIT_SECONDS` / `-Djavacli.mcp.startup.wait.seconds` 可调），超时后保留未完成 server 为 `STARTING` 并后台继续初始化；`/mcp` 查看最新状态。
-- `LineReader` 使用 `JavaCliHighlighter` 做输入实时高亮：slash 命令、`@` 引用、`@image:`、`@clipboard`、敏感词和明显危险 shell 片段会在编辑阶段被标记；不要把这类视觉提示混入最终提交文本。
+- `LineReader` 使用 `JavaCliHighlighter` 做输入实时高亮，并在键入以 `/` 起始的命令时联动 `BottomStatusBar` 采用原地变形（in-place morphing，严格保持 3 行高度）展示当前选中项与候选列表，彻底避免终端历史向上推挤滚屏；支持键盘 `↑` / `↓` 循环切换候选、`Tab` 自动补全选中项、`Enter` 选中/执行、`Esc` 退出建议态。
+- `/model` 与 `/models` 命令全量模仿 OpenCode 交互标准（对标 `anomalyco/opencode` 的 `dialog-model.tsx`）：
+  - 交互模式：键入 `/model` 或 `/models` 唤起全功能可搜索模型选择弹窗（`OpenCodeModelPicker`），支持实时拼写搜索过滤（Type-to-Search）、规范状态标签（`[active]` / `[ready]` / `[local]` / `[needs key]`）、键盘上下导航视口平滑滚动、已就绪模型一键即刻切换、缺失 Key 原位弹出脱敏录入（绝不中断抛错或让用户手动改文件）以及末尾一键连接新端点（`+ Connect new provider...`）。
+  - 命令行快捷操作：支持标准 `provider/model` 语法（如 `/model sensenova/deepseek-v4-flash`、`/models deepseek/deepseek-chat`）；支持 `/model show` 查看各供应商端点与脱敏 Key；支持 `/model key <apiKey>`（快速设置当前活跃供应商的 API Key）或 `/model key <provider> <apiKey>`；支持 `/model url <baseUrl>`（快速设置当前供应商 Base URL）或 `/model url <provider> <baseUrl>`；支持 `/model config <provider> [--key ...] [--url ...] [--model ...]` 多参数配置。所有修改自动热重载当前活跃客户端并持久化至 `~/.javacli/config.json`。
 - `LineReader` 使用 `JavaCliCompleter` 做上下文补全：`/model` provider、`/mcp` 子命令与 server、`/skill` 子命令与 skill name、`/task` / `/browser` / `/snapshot` 子命令、`@image:` 本地路径、本地 `@path` 和 MCP resource `@server:uri` 引用都应从同一个 completer 出口维护。
 - 普通用户输入进入 Agent 前会先展开 MCP resource mention，再由 `LocalPathMentionExpander` 展开本地 `@path`：文件会内联为 `<file>` 块，目录会内联为 `<directory>` 列表；绝对路径或符号链接逃逸项目根时保持原文不展开。
 - `LineReader` 使用 `JavaCliHistory` 持久化输入历史到 `~/.javacli/history/input.history`；如果 `javacli.history.file` / `JAVACLI_HISTORY_FILE` 指向目录，也会自动使用该目录下的 `input.history`，避免把目录当文件读；默认忽略空白、重复、明显密钥/Bearer、base64 图片和超长输入，用户可用 `/history clear` 清空本机输入历史。
@@ -124,6 +127,10 @@ src/main/java/com/javacli/
 ### Web + Browser
 
 - 已知 URL 先 `web_fetch`，SPA/防爬墙 fallback 到 Chrome DevTools MCP
+- `web_fetch` 支持三层渐进降级：
+  1. 真实 Chrome 浏览器 Headers + 域名 Cookie 自动注入（如 `ZHIHU_COOKIE`）+ `ZhihuExtractor`（优先从 SSR 的 `js-initialData` 结构化提取问题、高赞回答与专栏 Markdown）；
+  2. 可配置 `JAVACLI_READER_PROXY`（如 Jina Reader 或自建 Crawl4AI / Firecrawl）进行代理兜底；
+  3. 遭遇强反爬验证（`zh-zse-ck` / 登录墙）时输出清晰诊断，引导调用 `browser_connect` 共享本机 Chrome 真实登录会话（CDP `take_snapshot`）。
 - 浏览器读取优先 `take_snapshot`，不默认 `take_screenshot`
 - 公开页面不要提前切 shared 模式
 
