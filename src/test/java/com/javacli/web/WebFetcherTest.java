@@ -99,4 +99,54 @@ class WebFetcherTest {
         assertTrue(raw.body().contains("中文测试"));
         assertEquals("UTF-8", raw.charset());
     }
+
+    @Test
+    void sendsChromeHeadersAndClientHints() throws Exception {
+        server.enqueue(new MockResponse().setBody("<html><body>ok</body></html>"));
+        WebFetcher fetcher = new WebFetcher();
+        fetcher.fetch(server.url("/check-headers").toString());
+
+        var recorded = server.takeRequest();
+        String ua = recorded.getHeader("User-Agent");
+        assertNotNull(ua);
+        assertTrue(ua.contains("Chrome/"), "UA 应包含 Chrome: " + ua);
+        assertNotNull(recorded.getHeader("sec-ch-ua"));
+        assertNotNull(recorded.getHeader("sec-ch-ua-platform"));
+        assertEquals("document", recorded.getHeader("sec-fetch-dest"));
+    }
+
+    @Test
+    void injectsZhihuCookieWhenConfigured() throws Exception {
+        System.setProperty("zhihu.cookie", "d_c0=mock_dc0_12345; __zse_ck=mock_zse_ck");
+        try {
+            server.enqueue(new MockResponse().setBody("<html><body>ok</body></html>"));
+            WebFetcher fetcher = new WebFetcher();
+            // MockWebServer 默认 host 是 localhost，我们测试通过 WEB_FETCH_COOKIES 支持 localhost
+            System.setProperty("javacli.web.cookies", "localhost=d_c0=mock_dc0_12345");
+            fetcher.fetch(server.url("/test-cookie").toString());
+
+            var recorded = server.takeRequest();
+            assertEquals("d_c0=mock_dc0_12345", recorded.getHeader("Cookie"));
+        } finally {
+            System.clearProperty("zhihu.cookie");
+            System.clearProperty("javacli.web.cookies");
+        }
+    }
+
+    @Test
+    void throwsHttpChallengeExceptionOnAntiBotPage() {
+        server.enqueue(new MockResponse()
+                .setResponseCode(403)
+                .setBody("<html><head><meta id=\"zh-zse-ck\" content=\"challenge\"></head><body>zse_ck challenge</body></html>"));
+
+        WebFetcher fetcher = new WebFetcher();
+        WebFetcher.HttpChallengeException ex = assertThrows(
+                WebFetcher.HttpChallengeException.class,
+                () -> fetcher.fetch(server.url("/anti-bot").toString())
+        );
+
+        assertEquals(403, ex.getStatusCode());
+        assertTrue(ex.getChallengeBody().contains("zh-zse-ck"));
+        assertTrue(ex.getMessage().contains("反爬验证/登录挑战"));
+    }
 }

@@ -41,10 +41,33 @@ public class HtmlExtractor {
             "sidebar", "promo", "cookie", "footer", "navigation"
     );
 
+    private final ZhihuExtractor zhihuExtractor;
+
+    public HtmlExtractor() {
+        this.zhihuExtractor = new ZhihuExtractor(this);
+    }
+
     public Extracted extract(String html, String baseUrl) {
+        if (html == null || html.isBlank()) {
+            return new Extracted("", "");
+        }
         Document doc = Jsoup.parse(html, baseUrl == null ? "" : baseUrl, Parser.htmlParser());
         String title = pickTitle(doc);
 
+        // 1. 优先尝试特定站点专用提取器（在 cleanNoise 之前保留 script 等原始状态）
+        if (ZhihuExtractor.isZhihu(baseUrl, html)) {
+            if (ZhihuExtractor.isChallengeOrLoginWall(html)) {
+                return new Extracted(title.isBlank() ? "知乎安全验证 / 登录限制" : title,
+                        "⚠️ 目标页面触发了知乎反爬风控或强登录拦截（HTTP 403 / __zse_ck 挑战）。\n\n"
+                                + "该页面包含前端反爬脚本或登录遮罩，轻量 HTTP 抓取无法直接获取未登录正文。");
+            }
+            Extracted zhihuOut = zhihuExtractor.extract(doc, baseUrl);
+            if (zhihuOut != null && !zhihuOut.markdown().isBlank()) {
+                return zhihuOut;
+            }
+        }
+
+        // 2. 通用 Readability 提取流程
         cleanNoise(doc);
         Element main = pickMainElement(doc);
 
@@ -58,9 +81,26 @@ public class HtmlExtractor {
         return new Extracted(title, markdown);
     }
 
+    /**
+     * 将 HTML 片段渲染为 Markdown 文本。
+     */
+    public String renderFragment(String htmlFragment, String baseUrl) {
+        if (htmlFragment == null || htmlFragment.isBlank()) {
+            return "";
+        }
+        Document fragmentDoc = Jsoup.parseBodyFragment(htmlFragment, baseUrl == null ? "" : baseUrl);
+        StringBuilder out = new StringBuilder();
+        renderChildren(fragmentDoc.body(), out, false);
+        return collapseBlankLines(out.toString()).trim();
+    }
+
     private String pickTitle(Document doc) {
         String t = doc.title();
         if (t != null && !t.isBlank()) return t.trim();
+        Element og = doc.selectFirst("meta[property=og:title], meta[name=twitter:title]");
+        if (og != null && og.hasAttr("content") && !og.attr("content").isBlank()) {
+            return og.attr("content").trim();
+        }
         Element h1 = doc.selectFirst("h1");
         return h1 == null ? "" : h1.text().trim();
     }

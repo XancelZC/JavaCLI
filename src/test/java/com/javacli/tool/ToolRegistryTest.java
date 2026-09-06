@@ -1,6 +1,7 @@
 package com.javacli.tool;
 
 import com.javacli.browser.BrowserConnector;
+import com.javacli.web.WebFetcher;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -232,5 +233,31 @@ class ToolRegistryTest {
 
         assertEquals(List.of("global:默认用中文回答"), saved);
         assertTrue(result.contains("长期记忆(global)"));
+    }
+
+    @Test
+    void webFetchValidatesEmptyUrl() {
+        ToolRegistry registry = new ToolRegistry();
+        String res = registry.executeTool("web_fetch", "{\"url\":\"\"}");
+        assertTrue(res.contains("URL 不能为空"));
+    }
+
+    @Test
+    void webFetchReturnsAntiBotDiagnosticForZhihu() {
+        ToolRegistry registry = new ToolRegistry();
+        // 设置自定义 WebFetcher 模拟返回知乎反爬挑战
+        registry.setWebFetcher(new WebFetcher() {
+            @Override
+            public RawResponse fetch(String url) {
+                return new RawResponse(url,
+                        "<html><head><meta id=\"zh-zse-ck\" content=\"challenge\"></head><body>zse_ck</body></html>",
+                        "text/html", "UTF-8", false);
+            }
+        });
+
+        String res = registry.executeTool("web_fetch", "{\"url\":\"https://www.zhihu.com/question/12345\"}");
+        assertTrue(res.contains("目标页面启用了知乎反爬风控/登录验证"), res);
+        assertTrue(res.contains("browser_connect"), res);
+        assertTrue(res.contains("ZHIHU_COOKIE"), res);
     }
 }

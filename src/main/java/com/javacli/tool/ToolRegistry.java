@@ -32,6 +32,7 @@ import com.javacli.web.SearchProvider;
 import com.javacli.web.SearchProviderFactory;
 import com.javacli.web.SearchResult;
 import com.javacli.web.WebFetcher;
+import com.javacli.web.ZhihuExtractor;
 
 import java.io.File;
 import java.io.InputStreamReader;
@@ -175,6 +176,14 @@ public class ToolRegistry {
 
     public SkillRegistry getSkillRegistry() {
         return skillRegistry;
+    }
+
+    public void setWebFetcher(WebFetcher webFetcher) {
+        this.webFetcher = webFetcher;
+    }
+
+    public void setHtmlExtractor(HtmlExtractor htmlExtractor) {
+        this.htmlExtractor = htmlExtractor;
     }
 
     public void setSkillContextBuffer(SkillContextBuffer skillContextBuffer) {
@@ -911,21 +920,147 @@ public class ToolRegistry {
             return "❌ " + rateReason;
         }
 
+        String trimmedUrl = url.trim();
         try {
-            WebFetcher.RawResponse raw = webFetcher().fetch(url.trim());
+            WebFetcher.RawResponse raw = webFetcher().fetch(trimmedUrl);
             HtmlExtractor.Extracted extracted = htmlExtractor().extract(raw.body(), raw.url());
             String markdown = extracted.markdown();
+
+            // 如果提取结果命中已知反爬挑战
+            if (WebFetcher.isAntiBotChallenge(raw.body())
+                    || extracted.title().contains("安全验证")
+                    || extracted.title().contains("知乎安全验证")
+                    || (markdown != null && markdown.contains("触发了知乎反爬风控"))) {
+                String proxyResult = tryReaderProxyFallback(trimmedUrl, maxChars);
+                if (proxyResult != null) {
+                    return proxyResult;
+                }
+                return buildAntiBotDiagnostic(trimmedUrl, extracted.title());
+            }
+
+            // 如果正文为空，尝试 Reader 代理降级或反爬诊断
+            if (markdown == null || markdown.isBlank()) {
+                String proxyResult = tryReaderProxyFallback(trimmedUrl, maxChars);
+                if (proxyResult != null) {
+                    return proxyResult;
+                }
+                if (ZhihuExtractor.isZhihu(trimmedUrl, raw.body())) {
+                    return buildAntiBotDiagnostic(trimmedUrl, "未登录无法访问知乎长正文");
+                }
+            }
+
+            int originalLength = markdown == null ? 0 : markdown.length();
+            boolean truncated = false;
+            if (maxChars > 0 && markdown != null && markdown.length() > maxChars) {
+                markdown = markdown.substring(0, maxChars);
+                truncated = true;
+            }
+            FetchResult result = FetchResult.ok(raw.url(), extracted.title(), markdown, originalLength, truncated);
+            return formatFetchResult(result);
+        } catch (WebFetcher.HttpChallengeException e) {
+            String proxyResult = tryReaderProxyFallback(trimmedUrl, maxChars);
+            if (proxyResult != null) {
+                return proxyResult;
+            }
+            return buildAntiBotDiagnostic(trimmedUrl, e.getMessage());
+        } catch (Exception e) {
+            if (e.getMessage() != null && e.getMessage().contains("403")) {
+                String proxyResult = tryReaderProxyFallback(trimmedUrl, maxChars);
+                if (proxyResult != null) {
+                    return proxyResult;
+                }
+                if (trimmedUrl.contains("zhihu.com")) {
+                    return buildAntiBotDiagnostic(trimmedUrl, "知乎返回 403 Forbidden（缺少有效 Cookie 或触发防爬盾）");
+                }
+            }
+            return "抓取失败: " + e.getMessage();
+        }
+    }
+
+    private String tryReaderProxyFallback(String targetUrl, int maxChars) {
+        String template = getReaderProxyTemplate();
+        if (template == null || template.isBlank()) {
+            return null;
+        }
+        String proxyUrl;
+        if (template.contains("%s")) {
+            proxyUrl = String.format(template, targetUrl);
+        } else if (template.endsWith("/")) {
+            proxyUrl = template + targetUrl;
+        } else {
+            proxyUrl = template + "/" + targetUrl;
+        }
+
+        try {
+            WebFetcher.RawResponse proxyRaw = webFetcher().fetch(proxyUrl);
+            String body = proxyRaw.body();
+            if (body == null || body.isBlank() || WebFetcher.isAntiBotChallenge(body)) {
+                return null;
+            }
+            String title = "";
+            String markdown = body;
+            if (body.contains("Title:") && body.contains("Markdown Content:")) {
+                int titleIdx = body.indexOf("Title:");
+                int titleEnd = body.indexOf('\n', titleIdx);
+                if (titleIdx >= 0 && titleEnd > titleIdx) {
+                    title = body.substring(titleIdx + 6, titleEnd).trim();
+                }
+                int mdIdx = body.indexOf("Markdown Content:");
+                if (mdIdx >= 0) {
+                    markdown = body.substring(mdIdx + "Markdown Content:".length()).trim();
+                }
+            } else if (body.contains("<html") || body.contains("<body")) {
+                HtmlExtractor.Extracted ext = htmlExtractor().extract(body, targetUrl);
+                title = ext.title();
+                markdown = ext.markdown();
+            }
+
+            if (markdown == null || markdown.isBlank() || markdown.contains("安全验证 - 知乎") || markdown.contains("请您登录后查看更多")) {
+                return null;
+            }
+
             int originalLength = markdown.length();
             boolean truncated = false;
             if (maxChars > 0 && markdown.length() > maxChars) {
                 markdown = markdown.substring(0, maxChars);
                 truncated = true;
             }
-            FetchResult result = FetchResult.ok(raw.url(), extracted.title(), markdown, originalLength, truncated);
+            FetchResult result = FetchResult.ok(targetUrl + " (via reader proxy)", title, markdown, originalLength, truncated);
             return formatFetchResult(result);
-        } catch (Exception e) {
-            return "抓取失败: " + e.getMessage();
+        } catch (Exception ignored) {
+            return null;
         }
+    }
+
+    private String getReaderProxyTemplate() {
+        String p = System.getenv("JAVACLI_READER_PROXY");
+        if (p != null && !p.isBlank()) return p.trim();
+        p = System.getenv("WEB_READER_PROXY");
+        if (p != null && !p.isBlank()) return p.trim();
+        return System.getProperty("javacli.reader.proxy");
+    }
+
+    private String buildAntiBotDiagnostic(String url, String hintDetail) {
+        boolean isZhihu = url.contains("zhihu.com");
+        StringBuilder sb = new StringBuilder();
+        sb.append("🌐 抓取: ").append(url).append("\n");
+        sb.append("⚠️ 未提取到正文：目标页面启用了").append(isZhihu ? "知乎反爬风控/登录验证" : "强反爬风控/登录验证")
+                .append("（HTTP 403 / 挑战页 / 登录墙）。\n");
+        if (hintDetail != null && !hintDetail.isBlank()) {
+            sb.append("ℹ️ 拦截详情: ").append(hintDetail).append("\n");
+        }
+        sb.append("\n💡 建议解决方案与联动操作：\n");
+        sb.append("1. 【本机 Chrome 联动（推荐）】：若您已在本地 Chrome 浏览器中登录了该网站，可运行 /browser connect 或调用 browser_connect 开启共享模式，直接使用 browser MCP 工具（如 take_snapshot）抓取完整已登录页面，免受反爬拦截；\n");
+        if (isZhihu) {
+            sb.append("2. 【配置 Cookie】：在当前项目根目录的 .env 或 ~/.javacli/config.json 中添加：\n");
+            sb.append("   ZHIHU_COOKIE=d_c0=...; __zse_ck=...\n");
+            sb.append("   配置后无需额外命令，web_fetch 将自动携带该 Cookie 抓取；\n");
+        } else {
+            sb.append("2. 【配置 Cookie】：在 .env 中设置 WEB_FETCH_COOKIES=\"example.com=session_id=...\"；\n");
+        }
+        sb.append("3. 【Reader 代理兜底】：若有可用的 Reader 代理（如 Jina Reader 或自建 Crawl4AI / Firecrawl），可在 .env 中设置：\n");
+        sb.append("   JAVACLI_READER_PROXY=https://r.jina.ai/%s\n");
+        return sb.toString().trim();
     }
 
     private String formatFetchResult(FetchResult result) {
