@@ -290,9 +290,32 @@ public final class InlineRenderer implements Renderer {
         return new SlashPalette(out, terminal).open(title, items);
     }
 
+    @Override
+    public void setSlashSuggestions(List<SlashSuggestionItem> suggestions) {
+        setSlashSuggestions(suggestions, 0);
+    }
+
+    @Override
+    public void setSlashSuggestions(List<SlashSuggestionItem> suggestions, int selectedIndex) {
+        if (statusBar != null) {
+            statusBar.setSlashSuggestions(suggestions, selectedIndex);
+        }
+    }
+
+    @Override
+    public void clearSlashSuggestions() {
+        if (statusBar != null) {
+            statusBar.clearSlashSuggestions();
+        }
+    }
+
     /** 测试可见：当前实例是否启动了 status bar。 */
     public boolean hasStatusBar() {
         return statusBar != null;
+    }
+
+    public BottomStatusBar statusBar() {
+        return statusBar;
     }
 
     /** 测试 / Main.java 可见：拿到 terminal 用于其它 inline 组件。 */

@@ -1,14 +1,17 @@
 package com.javacli.render.inline;
 
 import com.javacli.render.StatusInfo;
+import com.javacli.util.AnsiStyle;
 import org.jline.terminal.Terminal;
 import org.jline.utils.InfoCmp;
 import org.jline.utils.AttributedString;
+import org.jline.utils.AttributedStringBuilder;
 import org.jline.utils.AttributedStyle;
 import org.jline.utils.Status;
 
 import java.io.PrintStream;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -31,6 +34,7 @@ public final class BottomStatusBar implements AutoCloseable {
     private final Terminal terminal;
     private final PrintStream out;
     private volatile StatusInfo current;
+    private volatile List<SlashSuggestionItem> slashSuggestions;
     private Status status;
     private volatile boolean started;
     private volatile boolean closed;
@@ -77,12 +81,45 @@ public final class BottomStatusBar implements AutoCloseable {
     /** 在即将读取输入时刷新 JLine dock；光标和输入行位置由 LineReader 管理。 */
     public void prepareInputLine() {
         renderDock();
-        moveCursorToDockInputRow();
     }
 
     /** 输入提交后保留底部 dock；正文继续在 JLine 保留区上方滚动。 */
     public void finishInputLine() {
         renderDock();
+    }
+
+    private volatile int selectedSuggestionIndex = 0;
+
+    /**
+     * 设置当前输入行下方的临时悬浮斜杠命令建议。
+     */
+    public void setSlashSuggestions(List<SlashSuggestionItem> suggestions) {
+        setSlashSuggestions(suggestions, 0);
+    }
+
+    public void setSlashSuggestions(List<SlashSuggestionItem> suggestions, int selectedIndex) {
+        this.slashSuggestions = (suggestions != null && !suggestions.isEmpty()) ? suggestions : null;
+        this.selectedSuggestionIndex = Math.max(0, selectedIndex);
+        renderDock();
+    }
+
+    /**
+     * 清空悬浮斜杠命令建议，恢复默认状态栏高度。
+     */
+    public void clearSlashSuggestions() {
+        if (this.slashSuggestions != null) {
+            this.slashSuggestions = null;
+            this.selectedSuggestionIndex = 0;
+            renderDock();
+        }
+    }
+
+    public List<SlashSuggestionItem> currentSlashSuggestions() {
+        return slashSuggestions;
+    }
+
+    public int currentSelectedSuggestionIndex() {
+        return selectedSuggestionIndex;
     }
 
     private void renderDock() {
@@ -93,7 +130,10 @@ public final class BottomStatusBar implements AutoCloseable {
         }
         int cols = TerminalCapabilities.safeSize(terminal).getColumns();
         synchronized (out) {
-            dock.update(formatStatusLines(info, cols));
+            dock.update(formatStatusLines(info, cols, slashSuggestions, selectedSuggestionIndex));
+            if (terminal != null) {
+                terminal.flush();
+            }
         }
     }
 
@@ -103,8 +143,7 @@ public final class BottomStatusBar implements AutoCloseable {
             return;
         }
         int rows = TerminalCapabilities.safeSize(terminal).getRows();
-        int cols = TerminalCapabilities.safeSize(terminal).getColumns();
-        int dockRows = formatStatusLines(info, cols).size() + 1; // JLine Status border.
+        int dockRows = 3; // 恒定保持 2 行内容 + 1 行 JLine 顶边框，杜绝任何物理尺寸抖动
         int inputRow = inputDockRow(rows, dockRows);
         synchronized (out) {
             terminal.puts(InfoCmp.Capability.cursor_address, inputRow, 0);
@@ -182,10 +221,65 @@ public final class BottomStatusBar implements AutoCloseable {
     }
 
     static List<AttributedString> formatStatusLines(StatusInfo info, int cols) {
-        return List.of(
-                new AttributedString(formatStatusLine(info, cols), AttributedStyle.DEFAULT),
-                new AttributedString(formatFooterLine(info, cols), AttributedStyle.DEFAULT.faint())
-        );
+        return formatStatusLines(info, cols, null, 0);
+    }
+
+    static List<AttributedString> formatStatusLines(StatusInfo info, int cols, List<SlashSuggestionItem> suggestions) {
+        return formatStatusLines(info, cols, suggestions, 0);
+    }
+
+    static List<AttributedString> formatStatusLines(StatusInfo info, int cols, List<SlashSuggestionItem> suggestions, int selectedIndex) {
+        if (suggestions == null || suggestions.isEmpty()) {
+            return List.of(
+                    new AttributedString(formatStatusLine(info, cols), AttributedStyle.DEFAULT),
+                    new AttributedString(formatFooterLine(info, cols), AttributedStyle.DEFAULT.faint())
+            );
+        }
+
+        int index = Math.max(0, Math.min(selectedIndex, suggestions.size() - 1));
+        SlashSuggestionItem active = suggestions.get(index);
+
+        // 第 1 行：原位高亮显示当前选中的命令、原型与说明
+        String activeCmd = active.display() != null ? active.display() : active.command();
+        String activeDesc = active.description() != null ? active.description() : "";
+        String idxTag = "[" + (index + 1) + "/" + suggestions.size() + "] ";
+
+        AttributedStringBuilder sb1 = new AttributedStringBuilder();
+        sb1.style(AttributedStyle.DEFAULT.foreground(AttributedStyle.CYAN).bold());
+        sb1.append(" ▶ ").append(idxTag);
+        sb1.style(AttributedStyle.DEFAULT.bold());
+        sb1.append(activeCmd);
+        if (!activeDesc.isBlank()) {
+            sb1.style(AttributedStyle.DEFAULT.foreground(AttributedStyle.WHITE));
+            sb1.append("  - ").append(activeDesc);
+        }
+        AttributedString line1 = new AttributedString(fitToColumns(sb1.toAnsi(), cols));
+
+        // 第 2 行：横向显示相邻候选命令与操作指引（↑↓ 切换, Tab 补全, Enter 执行）
+        StringBuilder candSb = new StringBuilder("   候选: ");
+        int count = 0;
+        for (int i = 0; i < suggestions.size() && count < 6; i++) {
+            SlashSuggestionItem item = suggestions.get(i);
+            if (i == index) {
+                candSb.append("[").append(item.command()).append("] ");
+            } else {
+                candSb.append(item.command()).append(" ");
+            }
+            count++;
+        }
+        if (suggestions.size() > 6) {
+            candSb.append("... ");
+        }
+        String shortcutTip = "(↑↓ 选择, Tab 补全, Enter 执行)";
+        int gap = Math.max(1, cols - AnsiStyle.displayWidth(candSb.toString()) - AnsiStyle.displayWidth(shortcutTip) - 1);
+        String line2Raw = fitToColumns(candSb.toString() + " ".repeat(gap) + shortcutTip, cols);
+
+        AttributedStringBuilder sb2 = new AttributedStringBuilder();
+        sb2.style(AttributedStyle.DEFAULT.faint());
+        sb2.append(line2Raw);
+        AttributedString line2 = sb2.toAttributedString();
+
+        return List.of(line1, line2);
     }
 
     static int inputDockRow(int terminalRows, int dockRows) {
@@ -197,10 +291,23 @@ public final class BottomStatusBar implements AutoCloseable {
             return "";
         }
         String safe = text == null ? "" : text;
-        if (safe.length() > cols) {
-            return safe.substring(0, cols);
+        int currentWidth = AnsiStyle.displayWidth(safe);
+        if (currentWidth > cols) {
+            StringBuilder sb = new StringBuilder();
+            int w = 0;
+            for (int i = 0; i < safe.length(); ) {
+                int cp = safe.codePointAt(i);
+                int charW = AnsiStyle.displayWidth(new String(Character.toChars(cp)));
+                if (w + charW > cols) {
+                    break;
+                }
+                sb.appendCodePoint(cp);
+                w += charW;
+                i += Character.charCount(cp);
+            }
+            return sb.toString() + " ".repeat(Math.max(0, cols - w));
         }
-        return safe + " ".repeat(cols - safe.length());
+        return safe + " ".repeat(Math.max(0, cols - currentWidth));
     }
 
     private static String environmentSummary(StatusInfo info) {
@@ -256,7 +363,7 @@ public final class BottomStatusBar implements AutoCloseable {
     }
 
     private static int visibleLength(String text) {
-        return text == null ? 0 : text.length();
+        return text == null ? 0 : AnsiStyle.displayWidth(text);
     }
 
     private static String formatTokens(long t) {

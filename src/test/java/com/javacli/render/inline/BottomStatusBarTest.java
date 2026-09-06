@@ -1,6 +1,7 @@
 package com.javacli.render.inline;
 
 import com.javacli.render.StatusInfo;
+import com.javacli.util.AnsiStyle;
 import org.jline.terminal.Size;
 import org.jline.terminal.Terminal;
 import org.junit.jupiter.api.Test;
@@ -37,7 +38,7 @@ class BottomStatusBarTest {
     void formatStatusLinePadsToColumnWidth() {
         StatusInfo info = new StatusInfo("glm-5.1", 0L, 200_000L, false, 0L);
         String line = BottomStatusBar.formatStatusLine(info, 80);
-        assertTrue(visible(line).length() == 80, "status line should fill the bar: " + visible(line).length());
+        assertEquals(80, AnsiStyle.displayWidth(line), "status line should fill the bar: " + AnsiStyle.displayWidth(line));
     }
 
     @Test
@@ -45,7 +46,19 @@ class BottomStatusBarTest {
         StatusInfo info = new StatusInfo("very-long-model-name-exceeding-cols",
                 999_999L, 200_000L, true, 0L);
         String line = BottomStatusBar.formatStatusLine(info, 30);
-        assertTrue(visible(line).length() == 30);
+        assertEquals(30, AnsiStyle.displayWidth(line));
+    }
+
+    @Test
+    void formatStatusLinePadsAndTruncatesWithCjkCharacters() {
+        StatusInfo info = StatusInfo.active("glm-5.1", 200_000L, false, "智能体规划中")
+                .withEnvironment("4 个服务", "2 个技能");
+
+        String line80 = BottomStatusBar.formatStatusLine(info, 80);
+        assertEquals(80, AnsiStyle.displayWidth(line80), "包含 CJK 字符的状态行应当对齐到指定终端列宽");
+
+        String line30 = BottomStatusBar.formatStatusLine(info, 30);
+        assertEquals(30, AnsiStyle.displayWidth(line30), "截断并填充后显示宽度必须精确等于列宽");
     }
 
     @Test
@@ -66,7 +79,7 @@ class BottomStatusBarTest {
     @Test
     void footerLineFitsColumnWidth() {
         String line = BottomStatusBar.formatFooterLine(StatusInfo.idle("glm-5.1", 200_000L, false), 40);
-        assertTrue(line.length() == 40, "footer should fill requested width: " + line.length());
+        assertEquals(40, AnsiStyle.displayWidth(line), "footer should fill requested width: " + AnsiStyle.displayWidth(line));
         assertTrue(line.contains("Auto Model"), line);
     }
 
@@ -175,6 +188,46 @@ class BottomStatusBarTest {
         } finally {
             bar.close();
         }
+    }
+
+    @Test
+    void formatStatusLinesRendersInPlaceMorphingDock() {
+        StatusInfo info = StatusInfo.idle("glm-5.1", 200_000L, false);
+        java.util.List<SlashSuggestionItem> suggestions = java.util.List.of(
+                new SlashSuggestionItem("/model", "/model [name]", "切换或配置当前 LLM 模型"),
+                new SlashSuggestionItem("/memory", "/memory <cmd>", "长期记忆管理"),
+                new SlashSuggestionItem("/mcp", "/mcp [cmd]", "MCP 服务器管理")
+        );
+
+        // 默认第 0 项选中
+        var lines0 = BottomStatusBar.formatStatusLines(info, 80, suggestions, 0);
+        assertEquals(2, lines0.size(), "建议状态下底栏必须保持严格恒定的 2 行，杜绝滚屏抖动");
+        assertTrue(lines0.get(0).toString().contains("▶ [1/3]"), "第一行应包含序号标识");
+        assertTrue(lines0.get(0).toString().contains("/model"), "第一行应高亮当前选中项 /model");
+        assertTrue(lines0.get(0).toString().contains("切换或配置当前 LLM 模型"), "第一行应包含命令说明");
+        assertTrue(lines0.get(1).toString().contains("候选:"), "第二行应展示候选流");
+        assertTrue(lines0.get(1).toString().contains("/memory"), "第二行应包含相邻候选项");
+        assertTrue(lines0.get(1).toString().contains("↑↓ 选择"), "第二行应包含键盘交互指引");
+
+        // 切换到第 1 项选中
+        var lines1 = BottomStatusBar.formatStatusLines(info, 80, suggestions, 1);
+        assertEquals(2, lines1.size());
+        assertTrue(lines1.get(0).toString().contains("▶ [2/3]"), "第一行应更新为 2/3");
+        assertTrue(lines1.get(0).toString().contains("/memory"), "第一行应高亮切换后的 /memory");
+        assertTrue(lines1.get(0).toString().contains("长期记忆管理"), "第一行应更新说明为长期记忆管理");
+        assertTrue(lines1.get(1).toString().contains("[/memory]"), "第二行应对当前项进行标记");
+    }
+
+    @Test
+    void formatStatusLinesRevertsToTwoLinesWhenSuggestionsEmpty() {
+        StatusInfo info = StatusInfo.idle("glm-5.1", 200_000L, false);
+        var linesWithNull = BottomStatusBar.formatStatusLines(info, 80, null);
+        assertEquals(2, linesWithNull.size());
+        assertTrue(linesWithNull.get(0).toString().contains("Ctrl+Y"));
+        assertTrue(linesWithNull.get(1).toString().contains("Auto Model"));
+
+        var linesWithEmpty = BottomStatusBar.formatStatusLines(info, 80, java.util.List.of());
+        assertEquals(2, linesWithEmpty.size());
     }
 
     private static String visible(String line) {

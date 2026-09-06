@@ -113,4 +113,20 @@ public interface Renderer extends AutoCloseable {
      * @return 选中项的下标；用户取消（Esc）返回 -1
      */
     int openPalette(String title, List<String> items);
+
+    /**
+     * 更新输入行下方的临时悬浮斜杠命令建议（OpenCode / Claude Code 风格）。
+     *
+     * @param suggestions 匹配的建议项列表；为空时自动收起
+     */
+    default void setSlashSuggestions(List<com.javacli.render.inline.SlashSuggestionItem> suggestions) {
+        setSlashSuggestions(suggestions, 0);
+    }
+
+    default void setSlashSuggestions(List<com.javacli.render.inline.SlashSuggestionItem> suggestions, int selectedIndex) {}
+
+    /**
+     * 清空并收起输入行下方的悬浮命令建议。
+     */
+    default void clearSlashSuggestions() {}
 }

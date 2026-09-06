@@ -94,7 +94,7 @@ public final class AnsiStyle {
         return prefix + text + RESET;
     }
 
-    private static int displayWidth(String text) {
+    public static int displayWidth(String text) {
         int width = 0;
         for (int i = 0; i < text.length(); ) {
             int codePoint = text.codePointAt(i);

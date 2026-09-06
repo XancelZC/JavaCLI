@@ -6,6 +6,7 @@ import org.jline.utils.AttributedString;
 import org.jline.utils.AttributedStringBuilder;
 import org.jline.utils.AttributedStyle;
 
+import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -16,6 +17,17 @@ import java.util.regex.Pattern;
  * @ 引用、图片输入、危险命令和敏感字段在输入阶段就有明确视觉反馈。
  */
 final class JavaCliHighlighter implements Highlighter {
+
+    private final Consumer<String> bufferListener;
+
+    public JavaCliHighlighter() {
+        this(null);
+    }
+
+    public JavaCliHighlighter(Consumer<String> bufferListener) {
+        this.bufferListener = bufferListener;
+    }
+
     private static final AttributedStyle COMMAND_STYLE = AttributedStyle.DEFAULT
             .foreground(AttributedStyle.CYAN)
             .bold();
@@ -51,6 +63,12 @@ final class JavaCliHighlighter implements Highlighter {
 
     @Override
     public AttributedString highlight(LineReader reader, String buffer) {
+        if (bufferListener != null) {
+            try {
+                bufferListener.accept(buffer);
+            } catch (Exception ignored) {
+            }
+        }
         String text = buffer == null ? "" : buffer;
         if (text.isEmpty()) {
             return AttributedString.EMPTY;
